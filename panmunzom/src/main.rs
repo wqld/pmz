@@ -1,8 +1,11 @@
 use aya::programs::{tc, SchedClassifier, TcAttachType};
 use clap::Parser;
+use discovery::Discovery;
 #[rustfmt::skip]
 use log::{debug, warn};
 use tokio::signal;
+
+mod discovery;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -46,6 +49,8 @@ async fn main() -> anyhow::Result<()> {
     let program: &mut SchedClassifier = ebpf.program_mut("panmunzom").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, TcAttachType::Egress)?;
+
+    tokio::spawn(async move { Discovery::watch().await });
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
