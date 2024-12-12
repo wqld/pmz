@@ -1,7 +1,4 @@
-use core::{
-    mem::{self, size_of, zeroed},
-    str::{self, from_utf8, from_utf8_unchecked},
-};
+use core::{mem, str};
 
 use aya_ebpf::programs::TcContext;
 use aya_log_ebpf::{error, info};
@@ -35,7 +32,7 @@ pub struct DnsHdr {
 }
 
 impl DnsHdr {
-    pub const LEN: usize = size_of::<DnsHdr>();
+    pub const LEN: usize = mem::size_of::<DnsHdr>();
 
     pub fn load(ctx: &TcContext) -> Result<Self, &'static str> {
         let mut dns_hdr: DnsHdr = ctx
@@ -109,7 +106,7 @@ impl DnsQuery {
             ctx,
             "ID={} DNS_NAME={} DNS_TYPE={} DNS_CLASS={}",
             dns_hdr.id,
-            unsafe { from_utf8_unchecked(&dns_query.name) },
+            unsafe { str::from_utf8_unchecked(&dns_query.name) },
             dns_query.record_type_to_str(),
             dns_query.class_to_str(),
         );
