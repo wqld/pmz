@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["panmunzom", "common", "ebpf"]
-default-members = ["panmunzom", "common"]
+members = ["daemon", "common", "ebpf"]
+default-members = ["daemon", "common"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }

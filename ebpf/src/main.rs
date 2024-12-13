@@ -18,7 +18,7 @@ use network_types::{
 use sock::SocketPair;
 
 #[classifier]
-pub fn panmunzom(ctx: TcContext) -> i32 {
+pub fn resolver(ctx: TcContext) -> i32 {
     match catch_dns_query(&ctx) {
         Ok(ret) => ret,
         Err(e) => {

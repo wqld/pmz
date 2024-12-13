@@ -46,7 +46,7 @@ async fn main() -> anyhow::Result<()> {
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&iface);
-    let program: &mut SchedClassifier = ebpf.program_mut("panmunzom").unwrap().try_into()?;
+    let program: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
     program.load()?;
     program.attach(&iface, TcAttachType::Egress)?;
 
