@@ -1,5 +1,9 @@
-use aya::programs::{tc, SchedClassifier, TcAttachType};
+use aya::{
+    maps::HashMap,
+    programs::{tc, SchedClassifier, TcAttachType},
+};
 use clap::Parser;
+use common::{DnsQuery, DnsRecordA};
 use discovery::Discovery;
 #[rustfmt::skip]
 use log::{debug, warn};
@@ -50,7 +54,11 @@ async fn main() -> anyhow::Result<()> {
     program.load()?;
     program.attach(&iface, TcAttachType::Egress)?;
 
-    tokio::spawn(async move { Discovery::watch().await });
+    let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
+        HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
+    let discovery = Discovery::new(service_registry);
+
+    tokio::spawn(async move { discovery.watch().await });
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

@@ -1,10 +1,11 @@
 use core::{mem, str};
 
-use aya_ebpf::programs::TcContext;
+use aya_ebpf::{bindings::TC_ACT_PIPE, programs::TcContext};
 use aya_log_ebpf::{error, info};
+use common::{DnsQuery, MAX_DNS_NAME_LENGTH};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 
-pub const MAX_DNS_NAME_LENGTH: usize = 256;
+use crate::SERVICE_REGISTRY;
 
 pub const RAW_QUERY: u16 = 1 << 15;
 const RAW_OPCODE_SHIFT: u16 = 11;
@@ -81,41 +82,40 @@ impl DnsHdr {
     }
 }
 
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct DnsQuery {
-    pub record_type: u16,
-    pub class: u16,
-    pub name: [u8; MAX_DNS_NAME_LENGTH],
-}
+pub struct DnsResolver {}
 
-impl DnsQuery {
-    pub fn handle(ctx: &TcContext, dns_hdr: &DnsHdr) -> Result<(), &'static str> {
-        let buf_len = ctx.len() as usize;
-
+impl DnsResolver {
+    pub fn handle_query(ctx: &TcContext) -> Result<i32, &'static str> {
         let mut dns_query = DnsQuery {
             record_type: 0,
             class: 0,
             name: unsafe { mem::zeroed() },
         };
 
-        dns_query.parse(ctx, buf_len)?;
+        Self::parse_query(ctx, &mut dns_query)?;
 
-        info!(ctx, "REQ: ");
         info!(
             ctx,
-            "ID={} DNS_NAME={} DNS_TYPE={} DNS_CLASS={}",
-            dns_hdr.id,
+            "DNS_NAME={} DNS_TYPE={} DNS_CLASS={}",
             unsafe { str::from_utf8_unchecked(&dns_query.name) },
-            dns_query.record_type_to_str(),
-            dns_query.class_to_str(),
+            Self::record_type_to_str(dns_query.record_type),
+            Self::class_to_str(dns_query.class),
         );
 
-        Ok(())
+        match unsafe { SERVICE_REGISTRY.get(&dns_query) } {
+            Some(_a_record) => {
+                info!(ctx, "some");
+                Ok(TC_ACT_PIPE)
+            }
+            None => {
+                info!(ctx, "none");
+                Ok(TC_ACT_PIPE)
+            }
+        }
     }
 
-    pub fn record_type_to_str(&self) -> &'static str {
-        match self.record_type {
+    pub fn record_type_to_str(record_type: u16) -> &'static str {
+        match record_type {
             1 => "A",
             2 => "NS",
             5 => "CNAME",
@@ -131,8 +131,8 @@ impl DnsQuery {
     }
 
     /// Convert class to string
-    pub fn class_to_str(&self) -> &'static str {
-        match self.class {
+    pub fn class_to_str(class: u16) -> &'static str {
+        match class {
             1 => "IN",
             2 => "CS",
             3 => "CH",
@@ -141,7 +141,9 @@ impl DnsQuery {
         }
     }
 
-    fn parse(&mut self, ctx: &TcContext, buf_len: usize) -> Result<(), &'static str> {
+    fn parse_query(ctx: &TcContext, dns_query: &mut DnsQuery) -> Result<(), &'static str> {
+        let buf_len = ctx.len() as usize;
+
         let mut cur_buf_idx = DNS_PAYLOAD_OFFSET;
         let mut name_idx = 0;
         let mut cur_label_len = None;
@@ -158,26 +160,21 @@ impl DnsQuery {
                 .map_err(|_| "failed to read DNS query name byte")?;
 
             if c == 0 {
-                match name_idx {
-                    n if n > 0 => self.name[name_idx] = c,
-                    _ => self.name[0] = c,
-                };
                 break;
             }
 
             if let Some(label_len) = cur_label_len {
-                self.name[name_idx] = c;
-                name_idx += 1;
-                cur_label_idx += 1;
-
                 if cur_label_idx == label_len as usize {
-                    if name_idx < MAX_DNS_NAME_LENGTH {
-                        self.name[name_idx] = b'.';
-                        name_idx += 1;
-                    }
+                    dns_query.name[name_idx] = b'.';
                     cur_label_len = None;
                     cur_label_idx = 0;
+                    name_idx += 1;
+                    continue;
                 }
+
+                dns_query.name[name_idx] = c;
+                cur_label_idx += 1;
+                name_idx += 1;
             } else {
                 cur_label_len = Some(c);
             }
@@ -185,21 +182,21 @@ impl DnsQuery {
             cur_buf_idx += 1;
         }
 
-        if (DNS_PAYLOAD_OFFSET + name_idx + 5) > buf_len {
+        if (cur_buf_idx + 5) > buf_len {
             error!(
                 ctx,
                 "boundary exceeded while retrieving DNS record type and class"
             );
         } else {
             let record_type: u16 = ctx
-                .load(DNS_PAYLOAD_OFFSET + name_idx + RECORD_TYPE_OFFSET)
+                .load(cur_buf_idx + RECORD_TYPE_OFFSET)
                 .map_err(|_| "failed to read record type")?;
             let class: u16 = ctx
-                .load(DNS_PAYLOAD_OFFSET + name_idx + CLASS_OFFSET)
+                .load(cur_buf_idx + CLASS_OFFSET)
                 .map_err(|_| "failed to read class")?;
 
-            self.record_type = u16::from_be(record_type);
-            self.class = u16::from_be(class);
+            dns_query.record_type = u16::from_be(record_type);
+            dns_query.class = u16::from_be(class);
         }
 
         Ok(())

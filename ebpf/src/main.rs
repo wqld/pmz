@@ -1,21 +1,27 @@
 #![no_std]
 #![no_main]
 
-mod dns;
+mod resolver;
 mod sock;
 
 use aya_ebpf::{
     bindings::{TC_ACT_PIPE, TC_ACT_SHOT},
-    macros::classifier,
+    macros::{classifier, map},
+    maps::HashMap,
     programs::TcContext,
 };
 use aya_log_ebpf::error;
-use dns::{DnsHdr, DnsQuery};
+use common::{DnsQuery, DnsRecordA};
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
 };
+use resolver::{DnsHdr, DnsResolver};
 use sock::SocketPair;
+
+#[map]
+static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> =
+    HashMap::<DnsQuery, DnsRecordA>::with_max_entries(1024, 0);
 
 #[classifier]
 pub fn resolver(ctx: TcContext) -> i32 {
@@ -61,7 +67,7 @@ fn handle_udp_egress(ctx: &TcContext) -> Result<i32, &'static str> {
             return Ok(TC_ACT_PIPE);
         }
 
-        DnsQuery::handle(ctx, &dns_hdr)?;
+        DnsResolver::handle_query(ctx)?;
     }
 
     Ok(TC_ACT_PIPE)
