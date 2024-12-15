@@ -84,8 +84,8 @@ impl<'a> Context<'a> {
 
     pub unsafe fn ignore_udp_csum(&self) {
         let udp_len = self.len() as usize - EthHdr::LEN - Ipv4Hdr::LEN;
-        (*self.udp_hdr).check = 0;
         (*self.udp_hdr).len = u16::to_be(udp_len as u16);
+        (*self.udp_hdr).check = 0;
     }
 
     pub unsafe fn recompute_ip_csum(&self) {
