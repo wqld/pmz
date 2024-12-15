@@ -91,7 +91,7 @@ impl Discovery {
 
     fn create_dns_query(name: &str, namespace: &str) -> Result<DnsQuery> {
         let mut dns_name = [0u8; MAX_DNS_NAME_LENGTH];
-        let combined = format!("{}.{}", name, namespace);
+        let combined = format!("{}.{}.svc", name, namespace);
         let bytes = combined.as_bytes();
         let len = bytes.len().min(256);
 
