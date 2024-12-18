@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["daemon", "common", "ebpf"]
+members = ["daemon", "common", "ebpf", "agent"]
 default-members = ["daemon", "common"]
 
 [workspace.dependencies]

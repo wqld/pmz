@@ -1,0 +1,21 @@
+[package]
+name = "agent"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio = { workspace = true, features = ["full"] }
+clap = { workspace = true, features = ["derive"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+futures-util = { version = "0.3", default-features = false }
+http-body-util = "0.1"
+bytes = "1"
+http = "1"
+rustls-pemfile = "2.2.0"
+rustls = "0.23.20"
+tokio-rustls = "0.26.1"
+hyper-rustls = "0.27.4"
