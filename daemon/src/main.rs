@@ -10,6 +10,7 @@ use log::{debug, warn};
 use tokio::signal;
 
 mod discovery;
+mod proxy;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -59,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let discovery = Discovery::new(service_registry);
 
     tokio::spawn(async move { discovery.watch().await });
+    tokio::spawn(async move { proxy::start().await });
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");
