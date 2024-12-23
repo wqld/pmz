@@ -1,21 +1,30 @@
 use core::{
     mem,
     ops::{Deref, DerefMut},
+    ptr,
 };
 
 use aya_ebpf::programs::TcContext;
+use aya_log_ebpf::info;
 use common::DnsHdr;
-use ebpf::ptr_at_mut;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{IpProto, Ipv4Hdr},
+    tcp::TcpHdr,
     udp::UdpHdr,
 };
 
+pub enum Kind {
+    DNS,
+    TCP,
+}
+
 pub struct Context<'a> {
     pub ctx: &'a mut TcContext,
+    pub kind: Option<Kind>,
     pub eth_hdr: *mut EthHdr,
     pub ip_hdr: *mut Ipv4Hdr,
+    pub tcp_hdr: *mut TcpHdr,
     pub udp_hdr: *mut UdpHdr,
     pub dns_hdr: *mut DnsHdr,
 }
@@ -35,43 +44,65 @@ impl DerefMut for Context<'_> {
 }
 
 impl<'a> Context<'a> {
-    pub fn load_dns_context(ctx: &'a mut TcContext) -> Result<Self, ()> {
-        let eth_hdr: *mut EthHdr = ptr_at_mut(ctx, 0)?;
+    fn new(ctx: &'a mut TcContext) -> Self {
+        Self {
+            ctx,
+            kind: None,
+            eth_hdr: ptr::null_mut(),
+            ip_hdr: ptr::null_mut(),
+            tcp_hdr: ptr::null_mut(),
+            udp_hdr: ptr::null_mut(),
+            dns_hdr: ptr::null_mut(),
+        }
+    }
 
-        match unsafe { (*eth_hdr).ether_type } {
+    pub fn load(ctx: &'a mut TcContext) -> Result<Self, ()> {
+        let mut ctx = Self::new(ctx);
+
+        ctx.eth_hdr = ctx.ptr_at_mut(0)?;
+
+        match unsafe { (*ctx.eth_hdr).ether_type } {
             EtherType::Ipv4 => {}
             _ => return Err(()),
         }
 
-        let ip_hdr: *mut Ipv4Hdr = ptr_at_mut(ctx, EthHdr::LEN)?;
+        ctx.ip_hdr = ctx.ptr_at_mut(EthHdr::LEN)?;
 
-        match unsafe { (*ip_hdr).proto } {
-            IpProto::Udp => {}
+        match unsafe { (*ctx.ip_hdr).proto } {
+            IpProto::Udp => {
+                ctx.kind = Some(Kind::DNS);
+                ctx.udp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
+
+                if (unsafe { *ctx.udp_hdr }).dest != u16::to_be(53) {
+                    return Err(());
+                }
+
+                ctx.dns_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+            }
+            IpProto::Tcp => {
+                ctx.kind = Some(Kind::TCP);
+                ctx.tcp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
+            }
             _ => return Err(()),
         }
 
-        let udp_hdr: *mut UdpHdr = ptr_at_mut(ctx, EthHdr::LEN + Ipv4Hdr::LEN)?;
-
-        if (unsafe { *udp_hdr }).dest != u16::to_be(53) {
-            return Err(());
-        }
-
-        let dns_hdr: *mut DnsHdr = ptr_at_mut(ctx, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
-
-        Ok(Self {
-            ctx,
-            eth_hdr,
-            ip_hdr,
-            udp_hdr,
-            dns_hdr,
-        })
+        Ok(ctx)
     }
 
     pub fn update_hdrs(&mut self) -> Result<(), ()> {
-        self.eth_hdr = ptr_at_mut(self, 0)?;
-        self.ip_hdr = ptr_at_mut(self, EthHdr::LEN)?;
-        self.udp_hdr = ptr_at_mut(self, EthHdr::LEN + Ipv4Hdr::LEN)?;
-        self.dns_hdr = ptr_at_mut(self, EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+        self.eth_hdr = self.ptr_at_mut(0)?;
+        self.ip_hdr = self.ptr_at_mut(EthHdr::LEN)?;
+        self.udp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
+        self.dns_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+
+        // match unsafe { (*self.ip_hdr).proto } {
+        //     IpProto::Udp => {
+        //         self.udp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
+        //         self.dns_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+        //     }
+        //     IpProto::Tcp => self.tcp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?,
+        //     _ => {}
+        // };
 
         Ok(())
     }
@@ -108,5 +139,17 @@ impl<'a> Context<'a> {
         }
 
         !((checksum & 0xffff) + (checksum >> 16)) as u16
+    }
+
+    pub fn ptr_at_mut<T>(&self, offset: usize) -> Result<*mut T, ()> {
+        let start = self.data();
+        let end = self.data_end();
+        let len = mem::size_of::<T>();
+
+        if start + offset + len > end {
+            return Err(());
+        }
+
+        Ok((start + offset) as *mut T)
     }
 }

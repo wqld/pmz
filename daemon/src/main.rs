@@ -3,12 +3,15 @@ use aya::{
     programs::{tc, SchedClassifier, TcAttachType},
 };
 use clap::Parser;
-use common::{DnsQuery, DnsRecordA};
+use command::Command;
+use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
 use discovery::Discovery;
 #[rustfmt::skip]
 use log::{debug, warn};
+use proxy::Proxy;
 use tokio::signal;
 
+mod command;
 mod discovery;
 mod proxy;
 
@@ -51,16 +54,33 @@ async fn main() -> anyhow::Result<()> {
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&iface);
-    let program: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
-    program.load()?;
-    program.attach(&iface, TcAttachType::Egress)?;
+    let tc_egress: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
+    tc_egress.load()?;
+    tc_egress.attach(&iface, TcAttachType::Egress)?;
+
+    let ingress_forwarder: &mut SchedClassifier =
+        ebpf.program_mut("ingress_forwarder").unwrap().try_into()?;
+    ingress_forwarder.load()?;
+    ingress_forwarder.attach("lo", TcAttachType::Ingress)?;
+
+    let egress_forwarder: &mut SchedClassifier =
+        ebpf.program_mut("egress_forwarder").unwrap().try_into()?;
+    egress_forwarder.load()?;
+    egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
         HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
     let discovery = Discovery::new(service_registry);
 
+    let nat_table: HashMap<_, NatKey, NatOrigin> =
+        HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
+    let proxy = Proxy::new(nat_table);
+
+    let command = Command::new();
+
     tokio::spawn(async move { discovery.watch().await });
-    tokio::spawn(async move { proxy::start().await });
+    tokio::spawn(async move { proxy.start().await });
+    tokio::spawn(async move { command.run().await });
 
     let ctrl_c = signal::ctrl_c();
     println!("Waiting for Ctrl-C...");

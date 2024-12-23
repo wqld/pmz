@@ -5,18 +5,6 @@ use core::mem;
 use aya_ebpf::programs::TcContext;
 
 // This file exists to enable the library target.
-pub fn ptr_at_mut<T>(ctx: &TcContext, offset: usize) -> Result<*mut T, ()> {
-    let start = ctx.data();
-    let end = ctx.data_end();
-    let len = mem::size_of::<T>();
-
-    if start + offset + len > end {
-        return Err(());
-    }
-
-    Ok((start + offset) as *mut T)
-}
-
 pub fn record_type_to_str(record_type: u16) -> &'static str {
     match record_type {
         1 => "A",

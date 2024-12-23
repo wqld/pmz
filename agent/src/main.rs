@@ -118,12 +118,11 @@ async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, h
     let port = req.uri().port_u16().unwrap_or(80);
 
     let stream = TcpStream::connect((host, port)).await.unwrap();
-    let io = TokioIo::new(stream);
 
     let (mut sender, conn) = http1::Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
-        .handshake(io)
+        .handshake(TokioIo::new(stream))
         .await?;
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
