@@ -6,10 +6,11 @@ use clap::Parser;
 use command::Command;
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
 use discovery::Discovery;
+use hyper::body::Bytes;
 #[rustfmt::skip]
 use log::{debug, warn};
 use proxy::Proxy;
-use tokio::signal;
+use tokio::{signal, sync::oneshot::Sender};
 
 mod command;
 mod discovery;
@@ -68,15 +69,17 @@ async fn main() -> anyhow::Result<()> {
     egress_forwarder.load()?;
     egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<HttpRequest>(1);
+
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
         HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
     let discovery = Discovery::new(service_registry);
 
     let nat_table: HashMap<_, NatKey, NatOrigin> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
-    let proxy = Proxy::new(nat_table);
+    let proxy = Proxy::new(nat_table, req_tx);
 
-    let command = Command::new();
+    let command = Command::new(req_rx);
 
     tokio::spawn(async move { discovery.watch().await });
     tokio::spawn(async move { proxy.start().await });
@@ -88,4 +91,9 @@ async fn main() -> anyhow::Result<()> {
     println!("Exiting...");
 
     Ok(())
+}
+
+pub struct HttpRequest {
+    pub req: http::Request<()>,
+    pub res: tokio::sync::oneshot::Sender<Bytes>,
 }

@@ -7,7 +7,7 @@ use aya_ebpf::{
     bindings::{BPF_F_PSEUDO_HDR, TC_ACT_PIPE},
     helpers::bpf_csum_diff,
 };
-use aya_log_ebpf::{debug, info};
+use aya_log_ebpf::debug;
 use common::{NatKey, NatOrigin};
 use memoffset::offset_of;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
@@ -59,7 +59,7 @@ impl<'a> TrafficForwarder<'a> {
                 let psh = (*self.tcp_hdr).psh();
                 let fin = (*self.tcp_hdr).fin();
 
-                info!(
+                debug!(
                     self.ctx.ctx,
                     "ingress src: {:i}:{}, dst: {:i}:{}->{:i}:{} {}/{}/{}/{}",
                     u32::from_be(src_addr),
@@ -105,7 +105,7 @@ impl<'a> TrafficForwarder<'a> {
                     .insert(&nat_key, &nat_orign, 0)
                     .map_err(|_| "Failed to insert NAT information to nat table")?;
 
-                info!(
+                debug!(
                     self.ctx.ctx,
                     "NatKey inserted src: {}:{} dst: {}:{}",
                     nat_key.src_addr,
@@ -148,7 +148,7 @@ impl<'a> TrafficForwarder<'a> {
                 let psh = (*self.tcp_hdr).psh();
                 let fin = (*self.tcp_hdr).fin();
 
-                info!(
+                debug!(
                     self.ctx.ctx,
                     "egress src: {:i}:{}->{:i}:{}, dst: {:i}:{} {}/{}/{}/{}",
                     u32::from_be(src_addr),

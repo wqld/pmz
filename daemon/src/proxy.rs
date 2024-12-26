@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
 use common::{NatKey, NatOrigin};
-use http_body_util::{BodyExt, Full};
+use http_body_util::Full;
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -12,17 +12,25 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
 use log::error;
 use tokio::net::TcpListener;
+use tokio::sync::mpsc::Sender;
+
+use crate::HttpRequest;
 
 static APP_USER_AGENT: &str = "pmz";
 
 pub struct Proxy {
     nat_table: Arc<RwLock<HashMap<MapData, NatKey, NatOrigin>>>,
+    req_tx: Sender<HttpRequest>,
 }
 
 impl Proxy {
-    pub fn new(nat_table: HashMap<MapData, NatKey, NatOrigin>) -> Self {
+    pub fn new(
+        nat_table: HashMap<MapData, NatKey, NatOrigin>,
+        req_tx: Sender<HttpRequest>,
+    ) -> Self {
         Self {
             nat_table: Arc::new(RwLock::new(nat_table)),
+            req_tx,
         }
     }
 
@@ -30,9 +38,9 @@ impl Proxy {
         let _proxy_addr = "";
         let proxy_port = 18328;
         let addr = SocketAddr::from(([127, 0, 0, 1], proxy_port));
-        let tunnel_addr = "localhost";
-        let tunnel_port = "18329";
-        let cert_path = "/home/wq/Workspace/panmunzom/agent/certs/server.crt";
+        // let tunnel_addr = "localhost";
+        // let tunnel_port = "18329";
+        // let cert_path = "/home/wq/Workspace/panmunzom/agent/certs/server.crt";
 
         let listener = TcpListener::bind(addr).await?;
         println!("Proxy: Listening on {}", addr);
@@ -74,13 +82,16 @@ impl Proxy {
                 u16::from_be(nat_origin.port)
             );
 
+            let tx = self.req_tx.clone();
+
             tokio::task::spawn(async move {
                 if let Err(e) = auto::Builder::new(TokioExecutor::new())
                     .serve_connection(
                         TokioIo::new(stream),
                         service_fn(move |req| {
                             let pmz_target = pmz_target.to_owned();
-                            request(req, pmz_target, &tunnel_addr, &tunnel_port, &cert_path)
+                            let tx = tx.clone();
+                            request(req, pmz_target, tx)
                         }),
                     )
                     .await
@@ -95,27 +106,26 @@ impl Proxy {
 async fn request(
     req: Request<Incoming>,
     pmz_target: String,
-    proxy_host: &str,
-    proxy_port: &str,
-    cert_path: &str,
+    tx: Sender<HttpRequest>,
 ) -> Result<Response<Full<Bytes>>> {
-    let proxy = reqwest::Proxy::all(format!("https://{}:{}", proxy_host, proxy_port))?;
-    let cert = reqwest::Certificate::from_pem(&std::fs::read(cert_path)?)?;
-    let client = reqwest::ClientBuilder::new()
-        .user_agent(APP_USER_AGENT)
-        .add_root_certificate(cert)
-        .proxy(proxy)
-        .build()?;
-
-    let (parts, body) = req.into_parts();
-    let body = body.collect().await?.to_bytes();
+    let (parts, _body) = req.into_parts();
+    // let body = body.collect().await?.to_bytes();
     let url = format!("http://{}{}", pmz_target, parts.uri);
-    let resp = client
-        .request(parts.method, url)
-        .headers(parts.headers)
-        .body(body)
-        .send()
-        .await?;
 
-    Ok(Response::new(Full::new(Bytes::from(resp.bytes().await?))))
+    let req = http::Request::builder()
+        .uri(url)
+        .method(parts.method)
+        .header(http::header::USER_AGENT, APP_USER_AGENT)
+        .header(http::header::HOST, pmz_target)
+        .body(())
+        .unwrap();
+
+    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<Bytes>();
+    tx.send(HttpRequest {
+        req,
+        res: oneshot_tx,
+    })
+    .await?;
+
+    Ok(Response::new(Full::new(Bytes::from(oneshot_rx.await?))))
 }

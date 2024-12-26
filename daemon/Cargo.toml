@@ -25,13 +25,19 @@ k8s-openapi = { version = "0.23.0", features = ["latest"] }
 futures = "0.3"
 hyper = { version = "1.5.2", features = ["full"] }
 http-body-util = "0.1.2"
-hyper-util = { version = "0.1.10", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
 reqwest = { version = "0.12.9", features = ["json"] }
 serde_json = "1.0.133"
 serde = { version = "1.0.216", features = ["derive"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
 rsln = "0.0.4"
 ipnet = "2.10.1"
+http = "1.2.0"
+rustls = "0.23.20"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.1"
+hyper-rustls = "0.27.4"
+h2 = "0.4.7"
 
 [build-dependencies]
 anyhow = { workspace = true }
