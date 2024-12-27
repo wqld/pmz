@@ -1,3 +1,4 @@
+use core::str;
 use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 
 use anyhow::{Context, Result};
@@ -108,7 +109,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
         .unwrap();
 
     // route
-    let service_cidr = "10.96.0.0/16";
+    let service_cidr = "10.96.0.0/16"; // TODO
     let service_cidr_net = service_cidr.parse::<IpNet>()?;
     let mut netlink = Netlink::new();
 
@@ -131,7 +132,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
     let forward_ready = Arc::new(Notify::new());
     let forward_ready_clone = forward_ready.clone();
 
-    let forward_future = async move {
+    let forward_future = async {
         let addr = SocketAddr::from(([127, 0, 0, 1], tunnel_port));
 
         let server = TcpListenerStream::new(TcpListener::bind(addr).await.unwrap()).try_for_each(
@@ -161,7 +162,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
     };
 
     // proxy tunnel
-    let tunnel_future = async move {
+    let tunnel_future = async {
         forward_ready.notified().await;
         info!("port_forward completed");
 
@@ -189,68 +190,32 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
             if let Some(http_request) = req_rx.lock().await.recv().await {
                 let mut send_req = send_req.clone();
                 tokio::task::spawn(async move {
-                    let req = http_request.req;
-                    let (res, _) = send_req.send_request(req, false).unwrap();
-                    http_request
-                        .res
-                        .send(
-                            res.await
-                                .unwrap()
-                                .into_body()
-                                .data()
-                                .await
-                                .unwrap()
-                                .unwrap(),
-                        )
+                    let target = http_request.target;
+
+                    let req = http::Request::builder()
+                        .uri(target)
+                        .method(http::Method::CONNECT)
+                        .version(http::Version::HTTP_2)
+                        .body(())
                         .unwrap();
+
+                    let (response, mut send_stream) = send_req.send_request(req, false).unwrap();
+                    let mut recv_stream = response.await.unwrap().into_body();
+
+                    tokio::task::spawn(async move {
+                        let req = http_request.request;
+
+                        info!("req: {:?}", req);
+                        send_stream.send_data(Bytes::from(req), false).unwrap();
+
+                        http_request
+                            .response
+                            .send(recv_stream.data().await.unwrap().unwrap())
+                            .unwrap();
+                    })
                 });
             }
         }
-
-        // let req = http::Request::builder()
-        //     .uri(pmz_target)
-        //     .method("CONNECT")
-        //     .header(http::header::USER_AGENT, APP_USER_AGENT)
-        //     .body(())
-        //     .unwrap();
-
-        // let mut send_req = sender.ready().await.unwrap();
-        // let (res, mut send_stream) = send_req.send_request(req, false).unwrap();
-
-        // tokio::task::spawn(async move {
-        //     let mut response = res.await.unwrap().into_body();
-        //     // Process the response
-        //     while let Some(chunk) = response.data().await {
-        //         info!("chunk: {:?}", chunk);
-        //     }
-        // });
-
-        // let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(1);
-
-        // tokio::task::spawn(async move {
-        //     while let Some(http_request) = rx.recv().await {
-        //         info!("http_request: {:?}", http_request);
-
-        //         send_stream
-        //             .send_data(Bytes::from(http_request), false)
-        //             .unwrap();
-        //     }
-        // });
-
-        // let host = pmz_target.split(':').next().unwrap();
-
-        // let http_request = format!(
-        //     "GET {uri} HTTP/1.1\r\n\
-        //  Host: {host}\r\n\
-        //  user-agent: {APP_USER_AGENT}\r\n\
-        //  Accept: */*\r\n\r\n",
-        //     uri = "/?echo_body=amazing",
-        //     host = host,
-        // );
-
-        // info!("http_request: {:?}", http_request);
-
-        // tx.send(http_request).await.unwrap();
     };
 
     let (_, _) = join!(forward_future, tunnel_future);
@@ -294,29 +259,29 @@ impl ServerCertVerifier for NoVerifier {
 
     fn verify_server_cert(
         &self,
-        end_entity: &CertificateDer<'_>,
-        intermediates: &[CertificateDer<'_>],
-        server_name: &ServerName<'_>,
-        ocsp_response: &[u8],
-        now: rustls::pki_types::UnixTime,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _server_name: &ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
         Ok(ServerCertVerified::assertion())
     }
 
     fn verify_tls12_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
     }
 
     fn verify_tls13_signature(
         &self,
-        message: &[u8],
-        cert: &CertificateDer<'_>,
-        dss: &rustls::DigitallySignedStruct,
+        _message: &[u8],
+        _cert: &CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
         Ok(HandshakeSignatureValid::assertion())
     }

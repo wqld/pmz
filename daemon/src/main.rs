@@ -7,10 +7,9 @@ use command::Command;
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
 use discovery::Discovery;
 use hyper::body::Bytes;
-#[rustfmt::skip]
 use log::{debug, warn};
 use proxy::Proxy;
-use tokio::{signal, sync::oneshot::Sender};
+use tokio::signal;
 
 mod command;
 mod discovery;
@@ -94,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
 }
 
 pub struct HttpRequest {
-    pub req: http::Request<()>,
-    pub res: tokio::sync::oneshot::Sender<Bytes>,
+    pub request: String,
+    pub source: String,
+    pub target: String,
+    pub response: tokio::sync::oneshot::Sender<Bytes>,
 }

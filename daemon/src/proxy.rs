@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
 use common::{NatKey, NatOrigin};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::service::service_fn;
 use hyper::{Request, Response};
@@ -15,8 +15,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 
 use crate::HttpRequest;
-
-static APP_USER_AGENT: &str = "pmz";
 
 pub struct Proxy {
     nat_table: Arc<RwLock<HashMap<MapData, NatKey, NatOrigin>>>,
@@ -89,9 +87,10 @@ impl Proxy {
                     .serve_connection(
                         TokioIo::new(stream),
                         service_fn(move |req| {
+                            let source = peer_addr.to_string();
                             let pmz_target = pmz_target.to_owned();
                             let tx = tx.clone();
-                            request(req, pmz_target, tx)
+                            request(req, source, pmz_target, tx)
                         }),
                     )
                     .await
@@ -105,27 +104,52 @@ impl Proxy {
 
 async fn request(
     req: Request<Incoming>,
+    peer_addr: String,
     pmz_target: String,
     tx: Sender<HttpRequest>,
 ) -> Result<Response<Full<Bytes>>> {
-    let (parts, _body) = req.into_parts();
-    // let body = body.collect().await?.to_bytes();
-    let url = format!("http://{}{}", pmz_target, parts.uri);
-
-    let req = http::Request::builder()
-        .uri(url)
-        .method(parts.method)
-        .header(http::header::USER_AGENT, APP_USER_AGENT)
-        .header(http::header::HOST, pmz_target)
-        .body(())
-        .unwrap();
+    let request = format_request_as_http(req).await;
 
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<Bytes>();
     tx.send(HttpRequest {
-        req,
-        res: oneshot_tx,
+        request,
+        source: peer_addr,
+        target: pmz_target,
+        response: oneshot_tx,
     })
     .await?;
 
     Ok(Response::new(Full::new(Bytes::from(oneshot_rx.await?))))
+}
+
+pub async fn format_request_as_http(req: Request<Incoming>) -> String {
+    let (parts, body) = req.into_parts();
+    let body = body.collect().await.unwrap().to_bytes();
+
+    let method = parts.method;
+    let uri = parts.uri;
+
+    let version = match parts.version {
+        http::Version::HTTP_09 => "HTTP/0.9",
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_11 => "HTTP/1.1",
+        http::Version::HTTP_2 => "HTTP/2.0",
+        http::Version::HTTP_3 => "HTTP/3.0",
+        _ => "HTTP/1.1",
+    };
+
+    let headers: String = parts
+        .headers
+        .into_iter()
+        .map(|(key, value)| {
+            let key = key.unwrap().to_string();
+            let value = value.to_str().unwrap();
+            format!("{key}: {value}")
+        })
+        .collect::<Vec<String>>()
+        .join("\r\n");
+
+    let body = String::from_utf8_lossy(&body);
+
+    format!("{method} {uri} {version}\r\n{headers}\r\n{body}\r\n")
 }
