@@ -8,12 +8,12 @@ use clap::Parser;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Incoming;
 use hyper::client::conn::http1;
+use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
@@ -58,8 +58,9 @@ async fn main() -> Result<()> {
                     return;
                 }
             };
-            if let Err(e) = auto::Builder::new(TokioExecutor::new())
-                .serve_connection_with_upgrades(TokioIo::new(tls_stream), service_fn(proxy))
+
+            if let Err(e) = http2::Builder::new(TokioExecutor::new())
+                .serve_connection(TokioIo::new(tls_stream), service_fn(proxy))
                 .await
             {
                 eprintln!("failed to serve connection: {:?}", e);
@@ -91,6 +92,7 @@ async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::
 }
 
 async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    println!("handle_connect: {:?}", req);
     if let Some(addr) = host_addr(req.uri()) {
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
@@ -114,17 +116,19 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes
 }
 
 async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    println!("handle_http: {:?}", req.uri());
+
     let host = req.uri().host().expect("uri has no host");
     let port = req.uri().port_u16().unwrap_or(80);
 
     let stream = TcpStream::connect((host, port)).await.unwrap();
-    let io = TokioIo::new(stream);
 
     let (mut sender, conn) = http1::Builder::new()
         .preserve_header_case(true)
         .title_case_headers(true)
-        .handshake(io)
+        .handshake(TokioIo::new(stream))
         .await?;
+
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
             println!("Connection failed: {:?}", err);
@@ -136,6 +140,9 @@ async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, h
 }
 
 async fn tunnel(upgraded: Upgraded, addr: String) -> io::Result<()> {
+    println!("tunnel addr: {:?}", addr);
+    println!("upgraded: {:?}", upgraded);
+
     let mut server = TcpStream::connect(addr).await?;
     let mut upgraded = TokioIo::new(upgraded);
 

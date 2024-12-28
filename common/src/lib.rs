@@ -13,9 +13,6 @@ pub struct DnsHdr {
     pub additional_count: u16,
 }
 
-#[cfg(feature = "user")]
-unsafe impl aya::Pod for DnsHdr {}
-
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DnsQuery {
@@ -36,3 +33,26 @@ pub struct DnsRecordA {
 
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for DnsRecordA {}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NatKey {
+    pub src_addr: u32,
+    pub dst_addr: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for NatKey {}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct NatOrigin {
+    pub addr: u32,
+    pub dummy: u16,
+    pub port: u16,
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for NatOrigin {}

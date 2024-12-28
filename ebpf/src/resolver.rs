@@ -87,7 +87,7 @@ impl<'a> DnsResolver<'a> {
         Self { ctx }
     }
 
-    pub fn handle_query(&mut self) -> Result<i32, &'static str> {
+    pub fn handle(&mut self) -> Result<i32, &'static str> {
         if !self.is_standard_query() {
             return Ok(TC_ACT_PIPE);
         }

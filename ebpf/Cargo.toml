@@ -9,6 +9,7 @@ common = { path = "../common" }
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
 network-types = "0.0.7"
+memoffset = "0.9.1"
 
 [build-dependencies]
 which = { workspace = true }
