@@ -1,7 +1,7 @@
 use core::str;
 use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, path::Path, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use futures::TryStreamExt;
 use http_body_util::Full;
 use hyper::{body::Bytes, server::conn::http1, service::service_fn, Response};
@@ -91,6 +91,34 @@ impl Command {
     }
 }
 
+fn find_service_cidr() -> Result<String> {
+    let output = std::process::Command::new("kubectl")
+        .arg("cluster-info")
+        .arg("dump")
+        .output()
+        .expect("failed to execute kubectl command");
+
+    if !output.status.success() {
+        bail!("kubectl cluster-info dump command failed");
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    if let Some(line) = stdout
+        .lines()
+        .find(|line| line.contains("service-cluster-ip-range"))
+    {
+        if let Some(cidr) = line.split("--service-cluster-ip-range=").nth(1) {
+            if let Some(cidr) = cidr.split(',').next() {
+                let cidr = cidr.trim_matches('"').to_owned();
+                info!("service cidr: {cidr}");
+                return Ok(cidr);
+            }
+        }
+    }
+
+    bail!("failed to find service cidr");
+}
+
 async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<Full<Bytes>>> {
     let namespace = "default";
     let agent_name = "test";
@@ -109,7 +137,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
         .unwrap();
 
     // route
-    let service_cidr = "10.96.0.0/16"; // TODO
+    let service_cidr = find_service_cidr().unwrap();
     let service_cidr_net = service_cidr.parse::<IpNet>()?;
     let mut netlink = Netlink::new();
 
@@ -205,7 +233,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
                     tokio::task::spawn(async move {
                         let req = http_request.request;
 
-                        info!("req: {:?}", req);
+                        debug!("req: {:?}", req);
                         send_stream.send_data(Bytes::from(req), false).unwrap();
 
                         http_request
@@ -220,7 +248,7 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
 
     let (_, _) = join!(forward_future, tunnel_future);
 
-    // netlink.route_handle(RtCmd::Delete, &route)?;
+    // netlink.route_handle(RtCmd::Delete, &route)?; // TODO
 
     Ok(Response::new(Full::<Bytes>::from("Connected")))
 }
@@ -235,7 +263,6 @@ async fn forward_connection(
     let mut upstream_conn = forwarder
         .take_stream(agent_port)
         .context("port not found in forwarder")?;
-    info!("notify_one");
     tokio::io::copy_bidirectional(&mut client_conn, &mut upstream_conn).await?;
     drop(upstream_conn);
     forwarder.join().await?;
