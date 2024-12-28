@@ -1,4 +1,4 @@
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
@@ -10,7 +10,7 @@ use hyper::service::service_fn;
 use hyper::{Request, Response};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use hyper_util::server::conn::auto;
-use log::error;
+use log::{debug, error};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 
@@ -33,20 +33,16 @@ impl Proxy {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let _proxy_addr = "";
         let proxy_port = 18328;
         let addr = SocketAddr::from(([127, 0, 0, 1], proxy_port));
-        // let tunnel_addr = "localhost";
-        // let tunnel_port = "18329";
-        // let cert_path = "/home/wq/Workspace/panmunzom/agent/certs/server.crt";
 
         let listener = TcpListener::bind(addr).await?;
-        println!("Proxy: Listening on {}", addr);
+        debug!("Proxy: Listening on {}", addr);
 
         loop {
             let (stream, _) = listener.accept().await?;
             let peer_addr = stream.peer_addr()?;
-            println!("peer_addr: {:?}", peer_addr);
+            debug!("peer_addr: {:?}", peer_addr);
 
             let peer_ip = match peer_addr.ip() {
                 IpAddr::V4(ipv4_addr) => ipv4_addr.to_bits(),
@@ -60,7 +56,7 @@ impl Proxy {
                 dst_port: u16::to_be(proxy_port),
             };
 
-            println!(
+            debug!(
                 "NatKey found src: {}:{} dst: {}:{}",
                 nat_key.src_addr, nat_key.src_port, nat_key.dst_addr, nat_key.dst_port
             );
@@ -68,15 +64,15 @@ impl Proxy {
             let nat_table = self.nat_table.read().unwrap();
             let nat_origin = nat_table.get(&nat_key, 0)?;
 
-            println!(
+            debug!(
                 "NatOrigin found: {:?}:{}",
-                std::net::Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
+                Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
                 u16::from_be(nat_origin.port)
             );
 
             let pmz_target = format!(
                 "{}:{}",
-                std::net::Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
+                Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
                 u16::from_be(nat_origin.port)
             );
 
@@ -87,10 +83,12 @@ impl Proxy {
                     .serve_connection(
                         TokioIo::new(stream),
                         service_fn(move |req| {
-                            let source = peer_addr.to_string();
-                            let pmz_target = pmz_target.to_owned();
-                            let tx = tx.clone();
-                            request(req, source, pmz_target, tx)
+                            handle_request(
+                                req,
+                                peer_addr.to_string(),
+                                pmz_target.clone(),
+                                tx.clone(),
+                            )
                         }),
                     )
                     .await
@@ -102,7 +100,7 @@ impl Proxy {
     }
 }
 
-async fn request(
+async fn handle_request(
     req: Request<Incoming>,
     peer_addr: String,
     pmz_target: String,

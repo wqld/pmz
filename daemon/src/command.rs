@@ -3,8 +3,14 @@ use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, path::Path, sync::A
 
 use anyhow::{bail, Context, Result};
 use futures::TryStreamExt;
+use http::{Method, Request, StatusCode};
 use http_body_util::Full;
-use hyper::{body::Bytes, server::conn::http1, service::service_fn, Response};
+use hyper::{
+    body::{Bytes, Incoming},
+    server::conn::http1,
+    service::service_fn,
+    Response,
+};
 use hyper_util::rt::TokioIo;
 use ipnet::IpNet;
 use k8s_openapi::api::core::v1::Pod;
@@ -13,7 +19,7 @@ use kube::{
     runtime::wait::{await_condition, conditions::is_pod_running},
     Client,
 };
-use log::{debug, info};
+use log::{debug, error, info};
 use rsln::{
     netlink::Netlink,
     types::{link::LinkAttrs, routing::RoutingBuilder},
@@ -68,23 +74,11 @@ impl Command {
                 if let Err(err) = http1::Builder::new()
                     .serve_connection(
                         TokioIo::new(stream),
-                        service_fn(move |_req| connect(req_rx.clone())),
-                        // service_fn(move |req| async move {
-                        //     match (req.method(), req.uri().path()) {
-                        //         (&Method::POST, "/connect") => connect(rx).await,
-                        //         (&Method::POST, "/disconnect") => {
-                        //             Ok(Response::new(Full::<Bytes>::from("Disconnected")))
-                        //         }
-                        //         _ => Ok(Response::builder()
-                        //             .status(StatusCode::NOT_FOUND)
-                        //             .body(Full::<Bytes>::from("Not Found"))
-                        //             .unwrap()),
-                        //     }
-                        // }),
+                        service_fn(move |req| handle_request(req, req_rx.clone())),
                     )
                     .await
                 {
-                    debug!("Error serving connection: {:?}", err);
+                    error!("Error serving connection: {err:#?}");
                 }
             });
         }
@@ -117,6 +111,16 @@ fn find_service_cidr() -> Result<String> {
     }
 
     bail!("failed to find service cidr");
+}
+
+async fn handle_request(
+    req: Request<Incoming>,
+    req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+) -> Result<Response<Full<Bytes>>> {
+    match (req.method(), req.uri().path()) {
+        (&Method::POST, "/connect") => connect(req_rx).await,
+        _ => not_found().await,
+    }
 }
 
 async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<Full<Bytes>>> {
@@ -251,6 +255,12 @@ async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<F
     // netlink.route_handle(RtCmd::Delete, &route)?; // TODO
 
     Ok(Response::new(Full::<Bytes>::from("Connected")))
+}
+
+async fn not_found() -> Result<Response<Full<Bytes>>> {
+    Ok(Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(Full::<Bytes>::from("Not found"))?)
 }
 
 async fn forward_connection(

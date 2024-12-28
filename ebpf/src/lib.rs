@@ -1,9 +1,5 @@
 #![no_std]
 
-use core::mem;
-
-use aya_ebpf::programs::TcContext;
-
 // This file exists to enable the library target.
 pub fn record_type_to_str(record_type: u16) -> &'static str {
     match record_type {

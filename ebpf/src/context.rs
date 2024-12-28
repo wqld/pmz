@@ -5,7 +5,6 @@ use core::{
 };
 
 use aya_ebpf::programs::TcContext;
-use aya_log_ebpf::info;
 use common::DnsHdr;
 use network_types::{
     eth::{EthHdr, EtherType},
