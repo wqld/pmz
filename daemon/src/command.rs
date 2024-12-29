@@ -118,9 +118,19 @@ async fn handle_request(
     req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
 ) -> Result<Response<Full<Bytes>>> {
     match (req.method(), req.uri().path()) {
+        (&Method::POST, "/agent") => deploy_agent(req_rx).await,
+        (&Method::DELETE, "/agent") => delete_agent(req_rx).await,
         (&Method::POST, "/connect") => connect(req_rx).await,
         _ => not_found().await,
     }
+}
+
+async fn deploy_agent(_req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<Full<Bytes>>> {
+    Ok(Response::new(Full::<Bytes>::from("Agent deployed")))
+}
+
+async fn delete_agent(_req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<Full<Bytes>>> {
+    Ok(Response::new(Full::<Bytes>::from("Agent deleted")))
 }
 
 async fn connect(req_rx: Arc<Mutex<Receiver<HttpRequest>>>) -> Result<Response<Full<Bytes>>> {

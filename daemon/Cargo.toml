@@ -20,13 +20,12 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 
 clap = { workspace = true, features = ["derive"] }
 
-kube = { version = "0.97.0", features = ["runtime", "client", "derive"] }
-k8s-openapi = { version = "0.23.0", features = ["latest"] }
+kube = { version = "0.98", features = ["runtime", "client", "derive"] }
+k8s-openapi = { version = "0.24", features = ["latest"] }
 futures = "0.3"
 hyper = { version = "1.5.2", features = ["full"] }
 http-body-util = "0.1.2"
 hyper-util = { version = "0.1", features = ["full"] }
-reqwest = { version = "0.12.9", features = ["json"] }
 serde_json = "1.0.133"
 serde = { version = "1.0.216", features = ["derive"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
