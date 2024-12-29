@@ -21,7 +21,7 @@ use resolver::DnsResolver;
 static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entries(1024, 0);
 
 #[map]
-static mut NAT_TABLE: HashMap<NatKey, NatOrigin> = HashMap::with_max_entries(1024, 0);
+static NAT_TABLE: HashMap<NatKey, NatOrigin> = HashMap::with_max_entries(1024, 0);
 
 #[classifier]
 pub fn resolver(mut ctx: TcContext) -> i32 {

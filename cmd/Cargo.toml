@@ -1,0 +1,11 @@
+[package]
+name = "pmzctl"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow.workspace = true
+log.workspace = true
+env_logger.workspace = true
+tokio = { workspace = true, features = ["full"] }
+clap = { workspace = true, features = ["derive"] }

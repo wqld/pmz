@@ -15,5 +15,5 @@ memoffset = "0.9.1"
 which = { workspace = true }
 
 [[bin]]
-name = "panmunzom"
+name = "pmz"
 path = "src/main.rs"

@@ -1,5 +1,5 @@
 [package]
-name = "panmunzom"
+name = "pmz"
 version = "0.1.0"
 edition = "2021"
 
@@ -57,5 +57,5 @@ aya-build = { workspace = true }
 ebpf = { path = "../ebpf" }
 
 [[bin]]
-name = "panmunzom"
+name = "pmz"
 path = "src/main.rs"
