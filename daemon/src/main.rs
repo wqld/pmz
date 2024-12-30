@@ -3,17 +3,18 @@ use aya::{
     programs::{tc, SchedClassifier, TcAttachType},
 };
 use clap::Parser;
-use command::Command;
+use command::{Command, HttpRequest};
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
-use discovery::Discovery;
-use hyper::body::Bytes;
 use log::{debug, warn};
 use proxy::Proxy;
 use tokio::signal;
 
 mod command;
 mod discovery;
+mod forward;
 mod proxy;
+mod route;
+mod tunnel;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -72,15 +73,13 @@ async fn main() -> anyhow::Result<()> {
 
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
         HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
-    let discovery = Discovery::new(service_registry);
 
     let nat_table: HashMap<_, NatKey, NatOrigin> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
     let proxy = Proxy::new(nat_table, req_tx);
 
-    let command = Command::new(req_rx);
+    let command = Command::new(req_rx, service_registry);
 
-    tokio::spawn(async move { discovery.watch().await });
     tokio::spawn(async move { proxy.start().await });
     tokio::spawn(async move { command.run().await });
 
@@ -90,11 +89,4 @@ async fn main() -> anyhow::Result<()> {
     println!("Exiting...");
 
     Ok(())
-}
-
-pub struct HttpRequest {
-    pub request: String,
-    pub source: String,
-    pub target: String,
-    pub response: tokio::sync::oneshot::Sender<Bytes>,
 }

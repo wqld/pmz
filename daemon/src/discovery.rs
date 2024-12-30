@@ -16,10 +16,8 @@ pub struct Discovery {
 }
 
 impl Discovery {
-    pub fn new(service_registry: HashMap<MapData, DnsQuery, DnsRecordA>) -> Self {
-        Self {
-            service_registry: Arc::new(RwLock::new(service_registry)),
-        }
+    pub fn new(service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>) -> Self {
+        Self { service_registry }
     }
 
     pub async fn watch(&self) -> Result<()> {
