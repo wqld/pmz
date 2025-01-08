@@ -24,6 +24,7 @@ struct Cli {
 enum Commands {
     Agent(AgentArgs),
     Connect,
+    Disconnect,
 }
 
 #[derive(Debug, Args)]
@@ -58,6 +59,10 @@ async fn main() -> Result<()> {
         Commands::Connect => {
             debug!("pmzctl connect");
             send_request_to_daemon(Method::POST, "/connect").await?;
+        }
+        Commands::Disconnect => {
+            debug!("pmzctl disconnect");
+            send_request_to_daemon(Method::DELETE, "/connect").await?;
         }
     };
 

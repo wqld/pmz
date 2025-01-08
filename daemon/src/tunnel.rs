@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use h2::client::SendRequest;
 use hyper::body::Bytes;
 use log::debug;
 use rustls::{
@@ -10,7 +11,7 @@ use rustls::{
 };
 use tokio::{
     net::TcpStream,
-    sync::{mpsc::Receiver, Mutex},
+    sync::{broadcast, mpsc::Receiver, Mutex},
 };
 use tokio_rustls::TlsConnector;
 
@@ -35,7 +36,7 @@ impl Tunnel {
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         let tunnel_addr = format!("{}:{}", self.tunnel_host, self.tunnel_port);
         let stream = TcpStream::connect(tunnel_addr).await.unwrap();
 
@@ -60,35 +61,46 @@ impl Tunnel {
         let send_req = sender.ready().await.unwrap();
 
         loop {
-            if let Some(http_request) = self.req_rx.lock().await.recv().await {
-                let mut send_req = send_req.clone();
-                tokio::task::spawn(async move {
-                    let target = http_request.target;
+            let mut req_rx = self.req_rx.lock().await;
 
-                    let req = http::Request::builder()
-                        .uri(target)
-                        .method(http::Method::CONNECT)
-                        .version(http::Version::HTTP_2)
-                        .body(())
-                        .unwrap();
-
-                    let (response, mut send_stream) = send_req.send_request(req, false).unwrap();
-                    let mut recv_stream = response.await.unwrap().into_body();
-
-                    tokio::task::spawn(async move {
-                        let req = http_request.request;
-
-                        debug!("req: {:?}", req);
-                        send_stream.send_data(Bytes::from(req), false).unwrap();
-
-                        http_request
-                            .response
-                            .send(recv_stream.data().await.unwrap().unwrap())
-                            .unwrap();
-                    })
-                });
+            tokio::select! {
+                Some(http_request) = req_rx.recv() => self.handle_http_request(send_req.clone(), http_request).await,
+                _ = shutdown.recv() => {
+                    debug!("tunnel shutdown");
+                    return Ok(())
+                }
             }
         }
+    }
+
+    async fn handle_http_request(&self, send_req: SendRequest<Bytes>, http_request: HttpRequest) {
+        let mut send_req = send_req.clone();
+
+        tokio::task::spawn(async move {
+            let target = http_request.target;
+
+            let req = http::Request::builder()
+                .uri(target)
+                .method(http::Method::CONNECT)
+                .version(http::Version::HTTP_2)
+                .body(())
+                .unwrap();
+
+            let (response, mut send_stream) = send_req.send_request(req, false).unwrap();
+            let mut recv_stream = response.await.unwrap().into_body();
+
+            tokio::task::spawn(async move {
+                let req = http_request.request;
+
+                debug!("req: {:?}", req);
+                send_stream.send_data(Bytes::from(req), false).unwrap();
+
+                http_request
+                    .response
+                    .send(recv_stream.data().await.unwrap().unwrap())
+                    .unwrap();
+            })
+        });
     }
 }
 

@@ -10,6 +10,7 @@ use proxy::Proxy;
 use tokio::signal;
 
 mod command;
+mod connect;
 mod discovery;
 mod forward;
 mod proxy;
