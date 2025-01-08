@@ -1,39 +1,40 @@
 use anyhow::{bail, Result};
 use ipnet::IpNet;
-use log::{debug, info};
+use log::{debug, error, info};
 use rsln::{
     netlink::Netlink,
-    types::{link::LinkAttrs, routing::RoutingBuilder},
+    types::{
+        link::LinkAttrs,
+        routing::{Routing, RoutingBuilder},
+    },
 };
 
 pub struct Route {
     netlink: Netlink,
-    oif_index: i32,
-    dst: IpNet,
+    service_route: Routing,
+}
+
+impl Drop for Route {
+    fn drop(&mut self) {
+        debug!("route dropped");
+        self.drop_routes()
+    }
 }
 
 impl Route {
-    pub fn new() -> Result<Self> {
+    pub fn setup_routes() -> Result<Self> {
         let service_cidr = Self::find_service_cidr()?;
         let service_cidr_net = service_cidr.parse::<IpNet>()?;
         let mut netlink = Netlink::new();
 
         let link = netlink.link_get(&LinkAttrs::new("lo"))?;
 
-        Ok(Self {
-            netlink,
-            oif_index: link.attrs().index,
-            dst: service_cidr_net,
-        })
-    }
-
-    pub fn add_service_route(&mut self) -> Result<()> {
-        let route = RoutingBuilder::default()
-            .oif_index(self.oif_index)
-            .dst(Some(self.dst))
+        let service_route = RoutingBuilder::default()
+            .oif_index(link.attrs().index)
+            .dst(Some(service_cidr_net))
             .build()?;
 
-        if let Err(e) = self.netlink.route_add(&route) {
+        if let Err(e) = netlink.route_add(&service_route) {
             if e.to_string().contains("File exists") {
                 debug!("route already exists");
             } else {
@@ -41,7 +42,16 @@ impl Route {
             }
         }
 
-        Ok(())
+        Ok(Self {
+            netlink,
+            service_route,
+        })
+    }
+
+    fn drop_routes(&mut self) {
+        if let Err(e) = self.netlink.route_del(&self.service_route) {
+            error!("failed to drop routes: {e:#?}");
+        }
     }
 
     fn find_service_cidr() -> Result<String> {
