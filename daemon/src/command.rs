@@ -164,7 +164,7 @@ async fn connect(
 
     let route = Route::setup_routes().unwrap();
     let discovery = Discovery::new(service_registry);
-    let forward = Forward::new(tunnel_port, pods);
+    let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
     let tunnel = Tunnel::new(&tunnel_host, tunnel_port, req_rx);
 
     tokio::spawn(async move { discovery.watch(client, shutdown_discovery).await });

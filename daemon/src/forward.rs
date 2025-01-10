@@ -13,19 +13,24 @@ use tokio::{
 use tokio_stream::wrappers::TcpListenerStream;
 
 pub struct Forward {
+    agent_name: String,
+    agent_port: u16,
     tunnel_port: u16,
     pods: Api<Pod>,
 }
 
 impl Forward {
-    pub fn new(tunnel_port: u16, pods: Api<Pod>) -> Self {
-        Self { tunnel_port, pods }
+    pub fn new(agent_name: &str, agent_port: u16, tunnel_port: u16, pods: Api<Pod>) -> Self {
+        Self {
+            agent_name: agent_name.to_owned(),
+            agent_port,
+            tunnel_port,
+            pods,
+        }
     }
 
     pub async fn start(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.tunnel_port));
-        let agent_name = "test";
-        let agent_port = 8100; // TODO
 
         let listener = TcpListener::bind(addr).await?;
         let mut stream = TcpListenerStream::new(listener);
@@ -34,7 +39,7 @@ impl Forward {
             tokio::select! {
                 Some(next) = stream.next() => {
                     match next {
-                        Ok(conn) => self.handle_connection(conn, &agent_name, agent_port),
+                        Ok(conn) => self.handle_connection(conn),
                         Err(err) => error!("failed to get next connection: {err:?}"),
                     }
                 },
@@ -46,15 +51,17 @@ impl Forward {
         }
     }
 
-    fn handle_connection(&self, conn: TcpStream, agent_name: &'static str, agent_port: u16) {
+    fn handle_connection(&self, conn: TcpStream) {
         if let Ok(peer_addr) = conn.peer_addr() {
             debug!("new connection: {peer_addr}");
         }
 
         let pods = self.pods.clone();
+        let agent_name = self.agent_name.clone();
+        let agent_port = self.agent_port;
         tokio::spawn(async move {
-            if let Err(e) = forward_connection(&pods, &agent_name, agent_port, conn).await {
-                error!("failed to forward connection: {e:?}");
+            if let Err(err) = forward_connection(&pods, &agent_name, agent_port, conn).await {
+                error!("failed to forward connection: {err:?}");
             }
         });
     }

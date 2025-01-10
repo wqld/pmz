@@ -76,13 +76,13 @@ async fn main() -> anyhow::Result<()> {
 
     let (req_tx, req_rx) = tokio::sync::mpsc::channel::<HttpRequest>(1);
 
+    let nat_table: HashMap<_, NatKey, NatOrigin> =
+        HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
+
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
         HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
 
-    let nat_table: HashMap<_, NatKey, NatOrigin> =
-        HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
     let proxy = Proxy::new(nat_table, req_tx);
-
     let command = Command::new(req_rx, service_registry);
 
     tokio::spawn(async move { proxy.start().await });
