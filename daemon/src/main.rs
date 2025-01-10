@@ -7,6 +7,7 @@ use command::{Command, HttpRequest};
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
 use log::{debug, warn};
 use proxy::Proxy;
+use sudo::PrivilegeLevel;
 use tokio::signal;
 
 mod command;
@@ -15,6 +16,7 @@ mod discovery;
 mod forward;
 mod proxy;
 mod route;
+mod sudo;
 mod tunnel;
 
 #[derive(Debug, Parser)]
@@ -25,9 +27,11 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let opt = Opt::parse();
-
     env_logger::init();
+
+    PrivilegeLevel::escalate_if_needed()?;
+
+    let opt = Opt::parse();
 
     // Bump the memlock rlimit. This is needed for older kernels that don't use the
     // new memcg based accounting, see https://lwn.net/Articles/837122/
