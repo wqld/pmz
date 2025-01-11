@@ -12,6 +12,7 @@ use tokio::signal;
 
 mod command;
 mod connect;
+mod deploy;
 mod discovery;
 mod forward;
 mod proxy;

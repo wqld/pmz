@@ -14,6 +14,7 @@ use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
+use log::{debug, error, info};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
@@ -28,21 +29,23 @@ struct Args {
     #[arg(short, long, default_value_t = 8100)]
     port: u16,
 
-    #[arg(short, long, required = true)]
+    #[arg(short, long, default_value = "/certs/pmz.crt")]
     cert: String,
 
-    #[arg(short, long, required = true)]
+    #[arg(short, long, default_value = "/certs/pmz.key")]
     key: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    env_logger::init();
+
     let args = Args::parse();
 
     let addr = SocketAddr::from((args.ip.parse::<std::net::IpAddr>()?, args.port));
 
     let listener = TcpListener::bind(addr).await?;
-    println!("Listening on {}", addr);
+    info!("Listening on {}", addr);
 
     let tls_acceptor = create_tls_acceptor(&args.cert, &args.key)?;
 
@@ -54,7 +57,7 @@ async fn main() -> Result<()> {
             let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                 Ok(tls_stream) => tls_stream,
                 Err(e) => {
-                    eprintln!("failed to perform tls handshake: {:?}", e);
+                    error!("failed to perform tls handshake: {:?}", e);
                     return;
                 }
             };
@@ -63,15 +66,15 @@ async fn main() -> Result<()> {
                 .serve_connection(TokioIo::new(tls_stream), service_fn(proxy))
                 .await
             {
-                eprintln!("failed to serve connection: {:?}", e);
+                error!("failed to serve connection: {:?}", e);
             }
         });
     }
 }
 
 fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
-    let cert = load_cert(cert_path)?;
-    let key = load_key(key_path)?;
+    let cert = load_cert(cert_path).expect("failed to load crt file");
+    let key = load_key(key_path).expect("failed to load key file");
 
     let mut server_config = ServerConfig::builder()
         .with_no_client_auth()
@@ -82,7 +85,7 @@ fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
 }
 
 async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    println!("req: {:?}", req);
+    debug!("req: {:?}", req);
 
     if Method::CONNECT == req.method() {
         handle_connect(req).await
@@ -92,22 +95,22 @@ async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::
 }
 
 async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    println!("handle_connect: {:?}", req);
+    debug!("handle_connect: {:?}", req);
     if let Some(addr) = host_addr(req.uri()) {
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
                     if let Err(e) = tunnel(upgraded, addr).await {
-                        eprintln!("server io error: {}", e);
+                        error!("server io error: {}", e);
                     };
                 }
-                Err(e) => eprintln!("upgrade error: {}", e),
+                Err(e) => error!("upgrade error: {}", e),
             }
         });
 
         Ok(Response::new(empty()))
     } else {
-        eprintln!("CONNECT host is not socket addr: {:?}", req.uri());
+        error!("CONNECT host is not socket addr: {:?}", req.uri());
         let mut resp = Response::new(full("CONNECT must be to a socket address"));
         *resp.status_mut() = http::StatusCode::BAD_REQUEST;
 
@@ -116,7 +119,7 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes
 }
 
 async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    println!("handle_http: {:?}", req.uri());
+    debug!("handle_http: {:?}", req.uri());
 
     let host = req.uri().host().expect("uri has no host");
     let port = req.uri().port_u16().unwrap_or(80);
@@ -131,7 +134,7 @@ async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, h
 
     tokio::task::spawn(async move {
         if let Err(err) = conn.await {
-            println!("Connection failed: {:?}", err);
+            error!("Connection failed: {:?}", err);
         }
     });
 
@@ -140,8 +143,8 @@ async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, h
 }
 
 async fn tunnel(upgraded: Upgraded, addr: String) -> io::Result<()> {
-    println!("tunnel addr: {:?}", addr);
-    println!("upgraded: {:?}", upgraded);
+    debug!("tunnel addr: {:?}", addr);
+    debug!("upgraded: {:?}", upgraded);
 
     let mut server = TcpStream::connect(addr).await?;
     let mut upgraded = TokioIo::new(upgraded);
@@ -149,7 +152,7 @@ async fn tunnel(upgraded: Upgraded, addr: String) -> io::Result<()> {
     let (from_client, from_server) =
         tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
 
-    println!(
+    debug!(
         "client wrote {} bytes and received {} bytes",
         from_client, from_server
     );

@@ -3,11 +3,8 @@ use std::path::Path;
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use http::Method;
-use http_body_util::Empty;
-use hyper::{
-    body::{Bytes, Incoming},
-    client::conn::http1,
-};
+use http_body_util::{BodyExt, Empty};
+use hyper::{body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use log::{debug, error};
 use tokio::net::UnixStream;
@@ -69,7 +66,7 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn send_request_to_daemon(method: Method, uri: &str) -> Result<http::Response<Incoming>> {
+async fn send_request_to_daemon(method: Method, uri: &str) -> Result<()> {
     let path = Path::new("/tmp/pmz.sock");
     let stream = UnixStream::connect(path).await?;
 
@@ -86,7 +83,9 @@ async fn send_request_to_daemon(method: Method, uri: &str) -> Result<http::Respo
         .body(Empty::<Bytes>::new())?;
 
     let res = sender.send_request(req).await?;
+    let (parts, body) = res.into_parts();
+    let body = body.collect().await.unwrap().to_bytes();
 
-    debug!("response: {}", res.status());
-    Ok(res)
+    debug!("response: {} {:?}", parts.status, body);
+    Ok(())
 }
