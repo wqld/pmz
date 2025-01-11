@@ -1,11 +1,4 @@
-use std::{
-    fs::{self, File},
-    io::Write,
-    os::unix::fs::PermissionsExt,
-    path::Path,
-    sync::Arc,
-    time::Duration,
-};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
@@ -19,18 +12,13 @@ use hyper::{
     Response,
 };
 use hyper_util::rt::TokioIo;
-use k8s_openapi::api::{
-    apps::v1::Deployment,
-    core::v1::{Pod, Secret},
-};
+use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, ListParams, Patch, PatchParams},
+    api::{Api, ListParams},
     runtime::wait::{await_condition, conditions::is_pod_running},
     ResourceExt,
 };
 use log::{debug, error, info};
-use rcgen::{generate_simple_self_signed, CertifiedKey};
-use serde_json::json;
 use tokio::{
     net::UnixListener,
     sync::{broadcast, mpsc::Receiver, Mutex, RwLock},
