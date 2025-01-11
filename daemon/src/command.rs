@@ -14,8 +14,9 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::Api,
+    api::{Api, ListParams},
     runtime::wait::{await_condition, conditions::is_pod_running},
+    ResourceExt,
 };
 use log::{debug, error, info};
 use tokio::{
@@ -26,6 +27,7 @@ use tokio::{
 
 use crate::{
     connect::{Connection, ConnectionManager},
+    deploy::Deploy,
     discovery::Discovery,
     forward::Forward,
     route::Route,
@@ -109,13 +111,23 @@ async fn handle_request(
 }
 
 async fn deploy_agent() -> Result<Response<Full<Bytes>>> {
-    // create cert/key
-    // apply cert/key secret to cluster
-    // deploy agnet deployment
+    let namespace = "default"; // TODO
+    let client = kube::Client::try_default().await?;
+    let deploy = Deploy::new(client, &namespace);
+
+    deploy.deploy_tls_secret().await?;
+    deploy.deploy_agent().await?;
+
     Ok(Response::new(Full::<Bytes>::from("Agent deployed")))
 }
 
 async fn delete_agent() -> Result<Response<Full<Bytes>>> {
+    let namespace = "default"; // TODO
+    let client = kube::Client::try_default().await?;
+    let deploy = Deploy::new(client, &namespace);
+
+    deploy.clean_resources().await?;
+
     Ok(Response::new(Full::<Bytes>::from("Agent deleted")))
 }
 
@@ -125,7 +137,6 @@ async fn connect(
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     let namespace = "default"; // TODO
-    let agent_name = "test"; // TODO
     let agent_port = 8100; // TODO
     let tunnel_host = "localhost";
     let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
@@ -150,12 +161,20 @@ async fn connect(
 
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
 
+    let lp = ListParams::default().labels("app=pmz-agent");
+    let agent_name = match pods.list(&lp).await?.iter().last() {
+        Some(p) => p.name_any(),
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::<Bytes>::from("Not found"))?)
+        }
+    };
+
     debug!("Checking if agent is running");
 
     let running = await_condition(pods.clone(), &agent_name, is_pod_running());
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running)
-        .await
-        .unwrap();
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running).await?;
 
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_discovery = shutdown_tx.subscribe();
@@ -192,7 +211,7 @@ async fn disconnect(
 
     match connection {
         Some(conn) => {
-            conn.shutdown_tx.send(()).unwrap();
+            conn.shutdown_tx.send(())?;
             Ok(Response::new(Full::<Bytes>::from("Disconnected")))
         }
         None => Ok(Response::new(Full::<Bytes>::from("No connection"))),
