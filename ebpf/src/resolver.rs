@@ -11,8 +11,8 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{debug, error};
 use common::{DnsHdr, DnsQuery, DnsRecordA, MAX_DNS_NAME_LENGTH};
-use ebpf::{class_to_str, record_type_to_str};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
+use pmz_ebpf::{class_to_str, record_type_to_str};
 
 use crate::{context::Context, SERVICE_REGISTRY};
 

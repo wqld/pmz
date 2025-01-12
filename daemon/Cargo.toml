@@ -11,7 +11,7 @@ default = ["ws"]
 ws = ["kube/ws"]
 
 [dependencies]
-common = { path = "../common", features = ["user"] }
+common = { package = "pmz-common", path = "../common", version = "0.1.0", features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -57,7 +57,7 @@ aya-build = { workspace = true }
 # Finally note that *any* usage of `artifact = ...` in *any* Cargo.toml in the workspace breaks
 # workflows with stable cargo; stable cargo outright refuses to load manifests that use unstable
 # features.
-ebpf = { path = "../ebpf" }
+ebpf = { package = "pmz-ebpf", path = "../ebpf", version = "0.1.0" }
 
 [[bin]]
 name = "pmz"
