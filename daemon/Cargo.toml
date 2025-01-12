@@ -2,13 +2,16 @@
 name = "pmz"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/wqld/pmz"
+description = "Enables access to Kubernetes services via their service domain (e.g., name.namespace.svc) from your local machine"
 
 [features]
 default = ["ws"]
 ws = ["kube/ws"]
 
 [dependencies]
-common = { path = "../common", features = ["user"] }
+common = { workspace = true, features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -54,7 +57,7 @@ aya-build = { workspace = true }
 # Finally note that *any* usage of `artifact = ...` in *any* Cargo.toml in the workspace breaks
 # workflows with stable cargo; stable cargo outright refuses to load manifests that use unstable
 # features.
-ebpf = { path = "../ebpf" }
+ebpf = { workspace = true }
 
 [[bin]]
 name = "pmz"

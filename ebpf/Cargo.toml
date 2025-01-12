@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-common = { path = "../common" }
+common = { workspace = true }
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }

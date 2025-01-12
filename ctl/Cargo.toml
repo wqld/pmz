@@ -2,6 +2,9 @@
 name = "pmzctl"
 version = "0.1.0"
 edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/wqld/pmz/tree/main/ctl"
+description = "A command-line tool that allows you to communicate with the pmz daemon to enable pmz features"
 
 [dependencies]
 anyhow.workspace = true
@@ -13,3 +16,7 @@ hyper = { version = "1.5.2", features = ["full"] }
 http-body-util = "0.1.2"
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1.2.0"
+
+[[bin]]
+name = "pmzctl"
+path = "src/main.rs"

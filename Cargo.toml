@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["daemon", "common", "ebpf", "agent", "ctl"]
-default-members = ["daemon", "common"]
+default-members = ["daemon", "common", "ctl"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }
@@ -20,6 +20,9 @@ libc = { version = "0.2.159", default-features = false }
 log = { version = "0.4.22", default-features = false }
 tokio = { version = "1.40.0", default-features = false }
 which = { version = "6.0.0", default-features = false }
+
+common = { version = "0.1.0", path = "./common" }
+ebpf = { version = "0.1.0", path = "./ebpf" }
 
 [profile.release.package.ebpf]
 debug = 2
