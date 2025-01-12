@@ -9,7 +9,11 @@ pmz is being developed to provide a convenient way to access workloads on a Kube
 
 Here are the features currently planned for pmz:
 
-- *Local access to workloads using Kubernetes service FQDNs*: Access cluster workloads seamlessly using their fully qualified domain names from your local environment. (implemented)
-- *Custom domain routing*: Configure custom domains to route to specific workloads, giving you flexibility and control over access.
-- *Sidecarless interception*: Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection.
-- *Domain-based personal intercepts*: Enable personal intercepts based on domain names rather than relying on header-based routing, providing a more streamlined and user-friendly experience.
+- **Local access to workloads using Kubernetes service FQDNs**: Access cluster workloads seamlessly using their fully qualified domain names from your local environment. (implemented)
+- **Custom domain routing**: Configure custom domains to route to specific workloads, giving you flexibility and control over access.
+- **Sidecarless interception**: Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection.
+- **Domain-based personal intercepts**: Enable personal intercepts based on domain names rather than relying on header-based routing, providing a more streamlined and user-friendly experience.
+
+## Architecture
+
+![pmz architecture](docs/images/pmz-arch.png)
