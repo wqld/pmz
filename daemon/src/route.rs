@@ -1,5 +1,13 @@
+use std::error::Error;
+
 use anyhow::{bail, Result};
 use ipnet::IpNet;
+use k8s_openapi::api::core::v1::Service;
+use kube::{
+    api::{DeleteParams, PostParams},
+    core::ErrorResponse,
+    Api,
+};
 use log::{debug, error, info};
 use rsln::{
     netlink::Netlink,
@@ -8,6 +16,7 @@ use rsln::{
         routing::{Routing, RoutingBuilder},
     },
 };
+use serde_json::json;
 
 pub struct Route {
     netlink: Netlink,
@@ -22,8 +31,8 @@ impl Drop for Route {
 }
 
 impl Route {
-    pub fn setup_routes() -> Result<Self> {
-        let service_cidr = Self::find_service_cidr()?;
+    pub async fn setup_routes() -> Result<Self> {
+        let service_cidr = Self::find_service_cidr().await?;
         let service_cidr_net = service_cidr.parse::<IpNet>()?;
         let mut netlink = Netlink::new();
 
@@ -54,27 +63,35 @@ impl Route {
         }
     }
 
-    fn find_service_cidr() -> Result<String> {
-        let output = std::process::Command::new("kubectl")
-            .arg("cluster-info")
-            .arg("dump")
-            .output()
-            .expect("failed to execute kubectl command");
+    async fn find_service_cidr() -> Result<String> {
+        let client = kube::Client::try_default().await?;
+        let services: Api<Service> = Api::default_namespaced(client);
 
-        if !output.status.success() {
-            bail!("kubectl cluster-info dump command failed");
-        }
+        let dummy: Service = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": "pmz-dummy"
+            },
+            "spec": {
+                "clusterIP": "1.1.1.1",
+                "ports": [{ "port": 443 }]
+            }
+        }))?;
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if let Some(line) = stdout
-            .lines()
-            .find(|line| line.contains("service-cluster-ip-range"))
-        {
-            if let Some(cidr) = line.split("--service-cluster-ip-range=").nth(1) {
-                if let Some(cidr) = cidr.split(',').next() {
-                    let cidr = cidr.trim_matches('"').to_owned();
-                    info!("service cidr: {cidr}");
-                    return Ok(cidr);
+        match services.create(&PostParams::default(), &dummy).await {
+            Ok(_) => {
+                services
+                    .delete("pmz-dummy", &DeleteParams::default())
+                    .await?;
+            }
+            Err(err) => {
+                if let Some(e) = err.source().unwrap().downcast_ref::<ErrorResponse>() {
+                    if let Some(cidr) = e.message.split("The range of valid IPs is ").nth(1) {
+                        info!("service cidr: {cidr}");
+                        let cidr = cidr.trim().to_owned();
+                        return Ok(cidr);
+                    }
                 }
             }
         }

@@ -181,7 +181,7 @@ async fn connect(
     let shutdown_forward = shutdown_tx.subscribe();
     let shutdown_tunnel = shutdown_tx.subscribe();
 
-    let route = Route::setup_routes().unwrap();
+    let route = Route::setup_routes().await?;
     let discovery = Discovery::new(service_registry);
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
     let tunnel = Tunnel::new(&tunnel_host, tunnel_port, req_rx);
