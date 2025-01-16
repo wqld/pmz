@@ -109,6 +109,7 @@ async fn handle_request(
         (&Method::POST, "/dns") => {
             add_dns(req.into_body(), service_registry, connection_manager).await
         }
+        (&Method::GET, "/dns") => list_dns(service_registry, connection_manager).await,
         _ => not_found().await,
     }
 }
@@ -145,7 +146,7 @@ async fn connect(
     let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
 
     let mut connection_manager = connection_manager.lock().await;
-    if let Some(_) = connection_manager.connections.get("default") {
+    if connection_manager.check_connection("default") {
         return Ok(Response::new(Full::<Bytes>::from("Already connected")));
     }
 
@@ -230,7 +231,7 @@ async fn add_dns(
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     let connection_manager = connection_manager.lock().await;
-    if !connection_manager.connections.contains_key("default") {
+    if !connection_manager.check_connection("default") {
         return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
             Full::<Bytes>::from(
                 "Not connected. Please run 'pmzctl connect' to establish a connection.",
@@ -311,7 +312,35 @@ async fn add_dns(
 
     registry.insert(dns_query, dns_recard_a, 0)?;
 
-    Ok(Response::new(Full::<Bytes>::from("add dns")))
+    Ok(Response::new(Full::<Bytes>::from("dns added")))
+}
+
+async fn list_dns(
+    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    connection_manager: Arc<Mutex<ConnectionManager>>,
+) -> Result<Response<Full<Bytes>>> {
+    let connection_manager = connection_manager.lock().await;
+    if !connection_manager.check_connection("default") {
+        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+            Full::<Bytes>::from(
+                "Not connected. Please run 'pmzctl connect' to establish a connection.",
+            ),
+        )?);
+    }
+
+    let registry = service_registry.read().await;
+    let services: String = registry
+        .iter()
+        .filter_map(Result::ok)
+        .map(|(query, record)| {
+            let name = String::from_utf8_lossy(&query.name);
+            let name = name.trim_end_matches('\0');
+            let ipv4: Ipv4Addr = Ipv4Addr::from_bits(record.ip);
+            format!("\n{} {}", name, ipv4)
+        })
+        .collect();
+
+    Ok(Response::new(Full::<Bytes>::from(services)))
 }
 
 async fn not_found() -> Result<Response<Full<Bytes>>> {
