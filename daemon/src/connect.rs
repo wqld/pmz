@@ -13,3 +13,9 @@ pub struct Connection {
 pub struct ConnectionManager {
     pub connections: HashMap<String, Connection>,
 }
+
+impl ConnectionManager {
+    pub fn check_connection(&self, name: &str) -> bool {
+        self.connections.contains_key(name)
+    }
+}

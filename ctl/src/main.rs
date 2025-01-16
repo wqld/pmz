@@ -47,6 +47,7 @@ struct DnsArgs {
 #[derive(Debug, Subcommand)]
 enum DnsCommands {
     Add(AddArgs),
+    List,
 }
 
 #[derive(Debug, Args, Serialize)]
@@ -89,6 +90,10 @@ async fn main() -> Result<()> {
                 debug!("pmzctl dns add");
                 let json = serde_json::to_string(&args)?;
                 send_request_to_daemon(Method::POST, "/dns", Some(json)).await?;
+            }
+            DnsCommands::List => {
+                debug!("pmzctl dns list");
+                send_request_to_daemon(Method::GET, "/dns", None).await?;
             }
         },
     };
