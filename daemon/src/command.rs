@@ -1,18 +1,18 @@
-use std::{fs, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
+use std::{fs, net::Ipv4Addr, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA};
 use http::{Method, Request, StatusCode};
-use http_body_util::Full;
+use http_body_util::{BodyExt, Full};
 use hyper::{
-    body::{Bytes, Incoming},
+    body::{Buf, Bytes, Incoming},
     server::conn::http1,
     service::service_fn,
     Response,
 };
 use hyper_util::rt::TokioIo;
-use k8s_openapi::api::core::v1::Pod;
+use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{
     api::{Api, ListParams},
     runtime::wait::{await_condition, conditions::is_pod_running},
@@ -106,6 +106,9 @@ async fn handle_request(
         (&Method::DELETE, "/agent") => delete_agent().await,
         (&Method::POST, "/connect") => connect(req_rx, service_registry, connection_manager).await,
         (&Method::DELETE, "/connect") => disconnect(connection_manager).await,
+        (&Method::POST, "/dns") => {
+            add_dns(req.into_body(), service_registry, connection_manager).await
+        }
         _ => not_found().await,
     }
 }
@@ -190,7 +193,10 @@ async fn connect(
     tokio::spawn(async move { forward.start(shutdown_forward).await });
     tokio::spawn(async move { tunnel.run(shutdown_tunnel).await });
 
-    let connection = Connection { route, shutdown_tx };
+    let connection = Connection {
+        _route: route,
+        shutdown_tx,
+    };
 
     match connection_manager
         .connections
@@ -216,6 +222,96 @@ async fn disconnect(
         }
         None => Ok(Response::new(Full::<Bytes>::from("No connection"))),
     }
+}
+
+async fn add_dns(
+    req: Incoming,
+    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    connection_manager: Arc<Mutex<ConnectionManager>>,
+) -> Result<Response<Full<Bytes>>> {
+    let connection_manager = connection_manager.lock().await;
+    if !connection_manager.connections.contains_key("default") {
+        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+            Full::<Bytes>::from(
+                "Not connected. Please run 'pmzctl connect' to establish a connection.",
+            ),
+        )?);
+    }
+
+    let body = req.collect().await?.aggregate();
+    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
+    debug!("data: {props:?}");
+
+    let mut registry = service_registry.write().await;
+
+    let mut domain_name: [u8; 256] = [0; 256];
+    let domain_from_req = match props["domain"].as_str() {
+        Some(domain) => domain.as_bytes(),
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::<Bytes>::from("Please provide the domain name."))?)
+        }
+    };
+
+    domain_name[..domain_from_req.len()].copy_from_slice(&domain_from_req);
+
+    let dns_query = DnsQuery {
+        record_type: 1,
+        class: 1,
+        name: domain_name,
+    };
+
+    let client = kube::Client::try_default().await?;
+
+    let namespace = props["namespace"].as_str().unwrap_or("default");
+    let service_name = match props["service"].as_str() {
+        Some(service) => service,
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::<Bytes>::from("Please provide the service name."))?)
+        }
+    };
+
+    let services: Api<Service> = Api::namespaced(client, &namespace);
+    let service = match services.get(&service_name).await {
+        Ok(service) => service,
+        Err(_) => {
+            return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                Full::<Bytes>::from(format!("Service {service_name:?} not founds")),
+            )?)
+        }
+    };
+
+    let service_ip = match service.spec {
+        Some(spec) => match spec.cluster_ip {
+            Some(ip) => ip,
+            None => {
+                return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                    Full::<Bytes>::from(format!(
+                        "Service {service_name:?} doesn't have the cluster ip"
+                    )),
+                )?)
+            }
+        },
+        None => {
+            return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                Full::<Bytes>::from(format!("Service {service_name:?} doesn't have the spec")),
+            )?)
+        }
+    };
+
+    let ipv4: Ipv4Addr = service_ip.parse()?;
+
+    let dns_recard_a = DnsRecordA {
+        ip: u32::from(ipv4),
+        ttl: 30,
+    };
+
+    registry.insert(dns_query, dns_recard_a, 0)?;
+
+    Ok(Response::new(Full::<Bytes>::from("add dns")))
 }
 
 async fn not_found() -> Result<Response<Full<Bytes>>> {
