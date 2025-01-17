@@ -111,7 +111,7 @@ async fn handle_request(
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<Bytes>();
     tx.send(HttpRequest {
         request,
-        source: peer_addr,
+        _source: peer_addr,
         target: pmz_target,
         response: oneshot_tx,
     })
