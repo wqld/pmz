@@ -1,6 +1,6 @@
 [package]
 name = "pmz"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 license = "Apache-2.0"
 repository = "https://github.com/wqld/pmz"
@@ -11,7 +11,7 @@ default = ["ws"]
 ws = ["kube/ws"]
 
 [dependencies]
-common = { package = "pmz-common", path = "../common", version = "0.1.0", features = ["user"] }
+common = { package = "pmz-common", path = "../common", features = ["user"] }
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -57,7 +57,7 @@ aya-build = { workspace = true }
 # Finally note that *any* usage of `artifact = ...` in *any* Cargo.toml in the workspace breaks
 # workflows with stable cargo; stable cargo outright refuses to load manifests that use unstable
 # features.
-ebpf = { package = "pmz-ebpf", path = "../ebpf", version = "0.1.0" }
+ebpf = { package = "pmz-ebpf", path = "../ebpf" }
 
 [[bin]]
 name = "pmz"

@@ -51,6 +51,11 @@ Configure custom domains to route to specific workloads, giving you flexibility 
 > pmzctl connect
 200 OK: Connected
 
+> k get svc
+NAME         TYPE        CLUSTER-IP    EXTERNAL-IP   PORT(S)   AGE
+echo         ClusterIP   10.96.25.30   <none>        80/TCP    28d
+kubernetes   ClusterIP   10.96.0.1     <none>        443/TCP   35d
+
 > pmzctl dns list
 200 OK:
 echo.default.svc 10.96.25.30

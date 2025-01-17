@@ -7,7 +7,7 @@ repository = "https://github.com/wqld/pmz"
 description = "Ebpf crate for pmz"
 
 [dependencies]
-common = { package = "pmz-common", path = "../common", version = "0.1.0" }
+common = { package = "pmz-common", path = "../common" }
 
 aya-ebpf = { workspace = true }
 aya-log-ebpf = { workspace = true }
