@@ -46,18 +46,25 @@ struct DnsArgs {
 
 #[derive(Debug, Subcommand)]
 enum DnsCommands {
-    Add(AddArgs),
+    Add(DnsAddArgs),
+    Remove(DnsRemoveArgs),
     List,
 }
 
 #[derive(Debug, Args, Serialize)]
-struct AddArgs {
+struct DnsAddArgs {
     #[arg(short, long)]
     domain: String,
     #[arg(short, long)]
     service: String,
     #[arg(short, long, default_value = "default")]
     namespace: String,
+}
+
+#[derive(Debug, Args, Serialize)]
+struct DnsRemoveArgs {
+    #[arg(short, long)]
+    domain: String,
 }
 
 #[tokio::main]
@@ -90,6 +97,11 @@ async fn main() -> Result<()> {
                 debug!("pmzctl dns add");
                 let json = serde_json::to_string(&args)?;
                 send_request_to_daemon(Method::POST, "/dns", Some(json)).await?;
+            }
+            DnsCommands::Remove(args) => {
+                debug!("pmzctl dns remove");
+                let json = serde_json::to_string(&args)?;
+                send_request_to_daemon(Method::DELETE, "/dns", Some(json)).await?;
             }
             DnsCommands::List => {
                 debug!("pmzctl dns list");

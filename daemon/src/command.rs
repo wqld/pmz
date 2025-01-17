@@ -109,6 +109,9 @@ async fn handle_request(
         (&Method::POST, "/dns") => {
             add_dns(req.into_body(), service_registry, connection_manager).await
         }
+        (&Method::DELETE, "/dns") => {
+            remove_dns(req.into_body(), service_registry, connection_manager).await
+        }
         (&Method::GET, "/dns") => list_dns(service_registry, connection_manager).await,
         _ => not_found().await,
     }
@@ -315,6 +318,49 @@ async fn add_dns(
     Ok(Response::new(Full::<Bytes>::from("dns added")))
 }
 
+async fn remove_dns(
+    req: Incoming,
+    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    connection_manager: Arc<Mutex<ConnectionManager>>,
+) -> Result<Response<Full<Bytes>>> {
+    let connection_manager = connection_manager.lock().await;
+    if !connection_manager.check_connection("default") {
+        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+            Full::<Bytes>::from(
+                "Not connected. Please run 'pmzctl connect' to establish a connection.",
+            ),
+        )?);
+    }
+
+    let body = req.collect().await?.aggregate();
+    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
+    debug!("data: {props:?}");
+
+    let mut registry = service_registry.write().await;
+
+    let mut domain_name: [u8; 256] = [0; 256];
+    let domain_from_req = match props["domain"].as_str() {
+        Some(domain) => domain.as_bytes(),
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::<Bytes>::from("Please provide the domain name."))?)
+        }
+    };
+
+    domain_name[..domain_from_req.len()].copy_from_slice(&domain_from_req);
+
+    let dns_query = DnsQuery {
+        record_type: 1,
+        class: 1,
+        name: domain_name,
+    };
+
+    registry.remove(&dns_query)?;
+
+    Ok(Response::new(Full::<Bytes>::from("dns removed")))
+}
+
 async fn list_dns(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
@@ -351,7 +397,7 @@ async fn not_found() -> Result<Response<Full<Bytes>>> {
 
 pub struct HttpRequest {
     pub request: String,
-    pub source: String,
+    pub _source: String,
     pub target: String,
     pub response: tokio::sync::oneshot::Sender<Bytes>,
 }
