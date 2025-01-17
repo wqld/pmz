@@ -1,9 +1,14 @@
-FROM rust:1 AS builder
+FROM --platform=$BUILDPLATFORM rust:1 AS builder
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM"
 
 COPY . .
 
 RUN apt-get update && apt-get install musl-tools -y
 RUN rustup target add $(uname -m)-unknown-linux-musl
+
 RUN cargo build --target $(uname -m)-unknown-linux-musl --release
 RUN mv /target/$(uname -m)-unknown-linux-musl/release/agent /target/pmz-agent
 
