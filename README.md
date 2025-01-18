@@ -135,16 +135,30 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 ### Installation
 
-TODO
+Download and extract the appropriate release for your local machine:
+
+```sh
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.1/pmz-0.1.1-${ARCH}-musl.tar.gz
+
+tar -xf pmz-0.1.1-${ARCH}-musl.tar.gz
+```
+
+Don't be alarmed if you encounter messages like the following during extraction.
+This is because the archive was created on macOS.
+A different method will be used for future releases:
+
+- `tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'`
+
+Next, let's start the `pmz` daemon.
+Since `pmz` uses eBPF, you need to specify your local machine's network interface so it knows where to load the eBPF program:
+
+```sh
+./pmz --iface enp0s1
+```
 
 ### Usage
 
-First, start the `pmz-daemon` on your local machine:
-
-```sh
-```
-
-Next, deploy the `pmz-agent` to your Kubernetes cluster:
+First, deploy the `pmz-agent` to your Kubernetes cluster:
 
 ```sh
 > pmzctl agent deploy
