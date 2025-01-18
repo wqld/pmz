@@ -3,7 +3,16 @@
 Panmunzom (pmz) enables access to Kubernetes services directly using their service domain,
 such as `name.namespace.svc`, from your local machine.
 
-## Feature Scope
+## Prerequisites
+
+`pmz` utilizes eBPF, requiring the following system specifications:
+
+- **Linux Kernel**: 4.4 or higher
+- **Supported Architectures**:
+  - `amd64` (`x86_64`)
+  - `arm64` (`aarch64`)
+
+## Features
 
 pmz is being developed to provide a convenient way to access workloads on a Kubernetes cluster from your local machine.
 
@@ -11,7 +20,7 @@ Here are the features currently planned for pmz:
 
 ### Local access to workloads using Kubernetes service FQDNs
 
-Access cluster workloads seamlessly using their fully qualified domain names from your local environment. (implemented)
+Access cluster workloads seamlessly using their fully qualified domain names from your local environment.
 
 ```sh
 > k get po,svc
@@ -45,7 +54,7 @@ Keep-Alive: timeout=5
 
 ### Custom domain routing
 
-Configure custom domains to route to specific workloads, giving you flexibility and control over access. (implemented)
+Configure custom domains to route to specific workloads, giving you flexibility and control over access.
 
 ```sh
 > pmzctl connect
@@ -95,11 +104,61 @@ kubernetes.default.svc 10.96.0.1
 
 ### Sidecarless interception
 
-Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection.
+Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection. (Not implemented yet)
 
 ### Domain-based personal intercepts
 
-Enable personal intercepts based on domain names rather than relying on header-based routing, providing a more streamlined and user-friendly experience.
+Enable personal intercepts based on domain names rather than relying on header-based routing, providing a more streamlined and user-friendly experience. (Not implemented yet)
+
+### Multi-cluster support
+
+`pmz` is planned to support connections to multiple clusters, if feasible.
+
+## Installation
+
+TODO
+
+## Usage
+
+First, start the `pmz-daemon` on your local machine:
+
+```sh
+```
+
+Next, deploy the `pmz-agent` to your Kubernetes cluster:
+
+```sh
+> pmzctl agent deploy
+200 OK: Agent deployed
+```
+
+After that, establish a tunnel between your local machine and the cluster:
+
+```sh
+> pmzctl connect
+200 OK: Connected
+
+> pmzctl dns list
+200 OK:
+kube-dns.kube-system.svc 10.96.0.10
+echo.default.svc 10.96.25.30
+kubernetes.default.svc 10.96.0.1
+```
+
+Now, you can freely access workloads in the cluster from your local machine using their domain names!
+
+```sh
+> curl "http://echo.default.svc/?echo_body=amazing"
+HTTP/1.1 200 OK
+Content-Type: application/json; charset=utf-8
+Content-Length: 9
+ETag: W/"9-9C3TDmXfhoWPizWzjFyCX+fxVeQ"
+Date: Fri, 17 Jan 2025 12:01:07 GMT
+Connection: keep-alive
+Keep-Alive: timeout=5
+
+"amazing"⏎
+```
 
 ## Architecture
 
