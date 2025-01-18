@@ -15,7 +15,7 @@ As a result, I was inspired to design and implement a new tool that could offer 
 My initial goal was to achieve performance comparable to Telepresence.
 Below is a simple throughput comparison of these tools under identical load conditions:
 
-<img src="docs/images/pmz-telepresence-performance.svg" width="500">
+<img src="docs/images/pmz-telepresence-performance.svg" width="400">
 
 However, it's important to note that `pmz` does not yet match the versatility and stability of Telepresence.
 It is currently limited to Linux operating systems and, as an early-stage project, may encounter various issues.
