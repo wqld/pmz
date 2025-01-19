@@ -113,7 +113,7 @@ async fn handle_request(
         request,
         _source: peer_addr,
         target: pmz_target,
-        response: oneshot_tx,
+        response: Some(oneshot_tx),
     })
     .await?;
 

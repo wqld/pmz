@@ -138,9 +138,9 @@ Enable personal intercepts based on domain names rather than relying on header-b
 Download and extract the appropriate release for your local machine:
 
 ```sh
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.1/pmz-0.1.1-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.1/pmz-0.1.2-${ARCH}-musl.tar.gz
 
-tar -xf pmz-0.1.1-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.2-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.
