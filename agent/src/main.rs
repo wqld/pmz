@@ -17,6 +17,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
 
@@ -28,6 +29,9 @@ struct Args {
 
     #[arg(short, long, default_value_t = 8100)]
     port: u16,
+
+    #[arg(short, long, default_value_t = 8101)]
+    health_check_port: u16,
 
     #[arg(short, long, default_value = "/certs/pmz.crt")]
     cert: String,
@@ -45,9 +49,22 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from((args.ip.parse::<std::net::IpAddr>()?, args.port));
 
     let listener = TcpListener::bind(addr).await?;
-    info!("Listening on {}", addr);
-
     let tls_acceptor = create_tls_acceptor(&args.cert, &args.key)?;
+    info!("Listening on {} w/ tls", addr);
+
+    let health_check_addr = SocketAddr::from(([0, 0, 0, 0], args.health_check_port));
+    let health_check_listener = TcpListener::bind(health_check_addr).await?;
+    info!("Health check listening on {}", health_check_addr);
+
+    tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = health_check_listener.accept().await.unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 6\r\n\r\nhealth"
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        }
+    });
 
     loop {
         let (tcp_stream, _) = listener.accept().await?;
