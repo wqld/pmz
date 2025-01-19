@@ -34,8 +34,14 @@ struct AgentArgs {
 
 #[derive(Debug, Subcommand)]
 enum AgentCommands {
-    Deploy,
+    Deploy(AgentDeployArgs),
     Delete,
+}
+
+#[derive(Debug, Args, Serialize)]
+struct AgentDeployArgs {
+    #[arg(short, long, default_value = "default")]
+    namespace: String,
 }
 
 #[derive(Debug, Args)]
@@ -75,9 +81,10 @@ async fn main() -> Result<()> {
 
     match args.command {
         Commands::Agent(agent) => match agent.command {
-            AgentCommands::Deploy => {
+            AgentCommands::Deploy(args) => {
                 debug!("pmzctl agent deploy");
-                send_request_to_daemon(Method::POST, "/agent", None).await?;
+                let json = serde_json::to_string(&args)?;
+                send_request_to_daemon(Method::POST, "/agent", Some(json)).await?;
             }
             AgentCommands::Delete => {
                 debug!("pmzctl agent delete");

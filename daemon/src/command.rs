@@ -14,9 +14,8 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{
-    api::{Api, ListParams},
+    api::Api,
     runtime::wait::{await_condition, conditions::is_pod_running},
-    ResourceExt,
 };
 use log::{debug, error, info};
 use tokio::{
@@ -102,7 +101,7 @@ async fn handle_request(
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     match (req.method(), req.uri().path()) {
-        (&Method::POST, "/agent") => deploy_agent().await,
+        (&Method::POST, "/agent") => deploy_agent(req.into_body()).await,
         (&Method::DELETE, "/agent") => delete_agent().await,
         (&Method::POST, "/connect") => connect(req_rx, service_registry, connection_manager).await,
         (&Method::DELETE, "/connect") => disconnect(connection_manager).await,
@@ -117,10 +116,23 @@ async fn handle_request(
     }
 }
 
-async fn deploy_agent() -> Result<Response<Full<Bytes>>> {
-    let namespace = "default"; // TODO
+async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
     let client = kube::Client::try_default().await?;
-    let deploy = Deploy::new(client, &namespace);
+
+    let _ = match Deploy::get_pod_info_by_label(client.clone(), "app=pmz-agent").await {
+        Ok(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::<Bytes>::from("pmz-agent is already deployed"))?)
+        }
+        Err(_) => {}
+    };
+
+    let body = req.collect().await?.aggregate();
+    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
+    let namespace = props["namespace"].as_str().unwrap_or("default");
+
+    let deploy = Deploy::new(client, namespace);
 
     deploy.deploy_tls_secret().await?;
     deploy.deploy_agent().await?;
@@ -129,10 +141,19 @@ async fn deploy_agent() -> Result<Response<Full<Bytes>>> {
 }
 
 async fn delete_agent() -> Result<Response<Full<Bytes>>> {
-    let namespace = "default"; // TODO
     let client = kube::Client::try_default().await?;
-    let deploy = Deploy::new(client, &namespace);
 
+    let (_, agent_namespace) =
+        match Deploy::get_pod_info_by_label(client.clone(), "app=pmz-agent").await {
+            Ok(pod_info) => pod_info,
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("pmz-agent not found"))?)
+            }
+        };
+
+    let deploy = Deploy::new(client, &agent_namespace);
     deploy.clean_resources().await?;
 
     Ok(Response::new(Full::<Bytes>::from("Agent deleted")))
@@ -143,7 +164,6 @@ async fn connect(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
-    let namespace = "default"; // TODO
     let agent_port = 8100; // TODO
     let tunnel_host = "localhost";
     let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
@@ -166,20 +186,19 @@ async fn connect(
         }
     };
 
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
+    let (agent_name, agent_namespace) =
+        match Deploy::get_pod_info_by_label(client.clone(), "app=pmz-agent").await {
+            Ok(pod_info) => pod_info,
+            Err(_) => {
+                return Ok(Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .body(Full::<Bytes>::from("pmz-agent not found"))?)
+            }
+        };
 
-    let lp = ListParams::default().labels("app=pmz-agent");
-    let agent_name = match pods.list(&lp).await?.iter().last() {
-        Some(p) => p.name_any(),
-        None => {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::<Bytes>::from("Not found"))?)
-        }
-    };
+    debug!("Checking if agent is running: {agent_name:?}");
 
-    debug!("Checking if agent is running");
-
+    let pods: Api<Pod> = Api::namespaced(client.clone(), &agent_namespace);
     let running = await_condition(pods.clone(), &agent_name, is_pod_running());
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running).await?;
 

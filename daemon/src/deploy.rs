@@ -1,10 +1,13 @@
 use std::{fs::File, io::Write, path::Path};
 
-use anyhow::Result;
-use k8s_openapi::api::{apps::v1::Deployment, core::v1::Secret};
+use anyhow::{bail, Result};
+use k8s_openapi::api::{
+    apps::v1::Deployment,
+    core::v1::{Pod, Secret},
+};
 use kube::{
-    api::{DeleteParams, Patch, PatchParams},
-    Api, Client,
+    api::{DeleteParams, ListParams, Patch, PatchParams},
+    Api, Client, Resource, ResourceExt,
 };
 use rcgen::{generate_simple_self_signed, CertifiedKey};
 use serde_json::json;
@@ -20,6 +23,19 @@ pub struct Deploy<'a> {
 impl<'a> Deploy<'a> {
     pub fn new(client: Client, namespace: &'a str) -> Self {
         Self { client, namespace }
+    }
+
+    pub async fn get_pod_info_by_label(client: Client, label: &str) -> Result<(String, String)> {
+        let pods: Api<Pod> = Api::all(client);
+
+        let lp = ListParams::default().labels(label);
+        match pods.list(&lp).await?.iter().last() {
+            Some(p) => Ok((
+                p.name_any(),
+                p.meta().namespace.clone().unwrap_or("default".to_owned()),
+            )),
+            None => bail!("failed to get resource"),
+        }
     }
 
     pub async fn deploy_tls_secret(&self) -> Result<()> {
