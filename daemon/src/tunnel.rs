@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
 use h2::client::SendRequest;
@@ -12,6 +12,7 @@ use rustls::{
 use tokio::{
     net::TcpStream,
     sync::{broadcast, mpsc::Receiver, Mutex},
+    time::Instant,
 };
 use tokio_rustls::TlsConnector;
 
@@ -62,9 +63,14 @@ impl Tunnel {
 
         loop {
             let mut req_rx = self.req_rx.lock().await;
+            let mut interval = tokio::time::interval_at(
+                Instant::now() + Duration::from_secs(60),
+                Duration::from_secs(60),
+            );
 
             tokio::select! {
                 Some(http_request) = req_rx.recv() => self.handle_http_request(send_req.clone(), http_request).await,
+                _ = interval.tick() => self.heartbeat(send_req.clone()).await,
                 _ = shutdown.recv() => {
                     debug!("tunnel shutdown");
                     return Ok(())
@@ -95,12 +101,26 @@ impl Tunnel {
                 debug!("req: {:?}", req);
                 send_stream.send_data(Bytes::from(req), false).unwrap();
 
-                http_request
-                    .response
-                    .send(recv_stream.data().await.unwrap().unwrap())
-                    .unwrap();
+                if let Some(res) = http_request.response {
+                    res.send(recv_stream.data().await.unwrap().unwrap())
+                        .unwrap();
+                }
             })
         });
+    }
+
+    async fn heartbeat(&self, send_req: SendRequest<Bytes>) {
+        debug!("ping");
+
+        let http_request = HttpRequest {
+            request: String::new(),
+            _source: String::new(),
+            target: "127.0.0.1:8101".to_string(),
+            response: None,
+        };
+
+        self.handle_http_request(send_req.clone(), http_request)
+            .await;
     }
 }
 

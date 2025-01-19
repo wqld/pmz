@@ -51,7 +51,7 @@ impl Forward {
         }
     }
 
-    fn handle_connection(&self, conn: TcpStream) {
+    fn handle_connection(&self, mut conn: TcpStream) {
         if let Ok(peer_addr) = conn.peer_addr() {
             debug!("new connection: {peer_addr}");
         }
@@ -60,7 +60,7 @@ impl Forward {
         let agent_name = self.agent_name.clone();
         let agent_port = self.agent_port;
         tokio::spawn(async move {
-            if let Err(err) = forward_connection(&pods, &agent_name, agent_port, conn).await {
+            if let Err(err) = forward_connection(&pods, &agent_name, agent_port, &mut conn).await {
                 error!("failed to forward connection: {err:?}");
             }
         });
@@ -71,13 +71,15 @@ async fn forward_connection(
     pods: &Api<Pod>,
     agent_name: &str,
     agent_port: u16,
-    mut client_conn: impl AsyncRead + AsyncWrite + Unpin,
+    client_conn: &mut (impl AsyncRead + AsyncWrite + Unpin),
 ) -> Result<()> {
     let mut forwarder = pods.portforward(agent_name, &[agent_port]).await?;
     let mut upstream_conn = forwarder
         .take_stream(agent_port)
         .context("port not found in forwarder")?;
-    tokio::io::copy_bidirectional(&mut client_conn, &mut upstream_conn).await?;
+
+    tokio::io::copy_bidirectional(client_conn, &mut upstream_conn).await?;
+
     drop(upstream_conn);
     forwarder.join().await?;
     debug!("connection closed");

@@ -399,5 +399,5 @@ pub struct HttpRequest {
     pub request: String,
     pub _source: String,
     pub target: String,
-    pub response: tokio::sync::oneshot::Sender<Bytes>,
+    pub response: Option<tokio::sync::oneshot::Sender<Bytes>>,
 }
