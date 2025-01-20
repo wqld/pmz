@@ -122,13 +122,18 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 `pmz` is planned to support connections to multiple clusters, if feasible.
 
+## Architecture
+
+![pmz architecture](docs/images/pmz-arch.png)
+
 ## Getting Started
 
 ### Prerequisites
 
 `pmz` utilizes eBPF, requiring the following system specifications:
 
-- **Linux Kernel**: 4.4 or higher
+- **Linux Kernel**: 6.8 or higher
+  - I am also testing on older kernels like version 5.4.0.
 - **Supported Architectures**:
   - `amd64` (`x86_64`)
   - `arm64` (`aarch64`)
@@ -138,9 +143,9 @@ Enable personal intercepts based on domain names rather than relying on header-b
 Download and extract the appropriate release for your local machine:
 
 ```sh
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.1/pmz-0.1.2-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.3/pmz-0.1.3-${ARCH}-musl.tar.gz
 
-tar -xf pmz-0.1.2-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.3-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.
@@ -153,7 +158,7 @@ Next, let's start the `pmz` daemon.
 Since `pmz` uses eBPF, you need to specify your local machine's network interface so it knows where to load the eBPF program:
 
 ```sh
-./pmz --iface enp0s1
+./pmz --iface eth0
 ```
 
 ### Usage
@@ -192,7 +197,3 @@ Keep-Alive: timeout=5
 
 "amazing"⏎
 ```
-
-## Architecture
-
-![pmz architecture](docs/images/pmz-arch.png)

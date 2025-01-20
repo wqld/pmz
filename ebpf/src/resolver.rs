@@ -50,7 +50,8 @@ impl DnsAnswer {
         }
     }
 
-    pub fn write_to_buffer(&self, dns_buf: &mut [u8], a_record: &DnsRecordA) {
+    #[inline(always)]
+    pub fn write_to_buffer(&self, dns_buf: &mut [u8], ip: u32) {
         let resp_slice = &mut dns_buf[..Self::LEN];
         let resp_ptr = resp_slice.as_mut_ptr() as *mut DnsAnswer;
 
@@ -58,7 +59,7 @@ impl DnsAnswer {
             *resp_ptr = *self;
         }
 
-        let ip_bytes = a_record.ip.to_be_bytes();
+        let ip_bytes = ip.to_be_bytes();
         let ip_slice = &mut dns_buf[Self::LEN..Self::LEN + 4];
         ip_slice.copy_from_slice(&ip_bytes);
     }
@@ -115,7 +116,7 @@ impl<'a> DnsResolver<'a> {
                 let mut extra_dns_buf = [0u8; MAX_DNS_BUFFER_LENGTH];
 
                 let dns_answer = DnsAnswer::from_a_record(a_record);
-                dns_answer.write_to_buffer(&mut extra_dns_buf, &a_record);
+                dns_answer.write_to_buffer(&mut extra_dns_buf, a_record.ip);
 
                 let answer_start = DNS_PAYLOAD_OFFSET + query_len;
                 let tail_adjust = answer_start + MAX_DNS_BUFFER_LENGTH - self.len() as usize;
