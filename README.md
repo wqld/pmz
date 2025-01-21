@@ -132,7 +132,7 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 `pmz` utilizes eBPF, requiring the following system specifications:
 
-- **Linux Kernel**: 6.8 or higher
+- **Linux Kernel**: 5.15 or higher
   - I am also testing on older kernels like version 5.4.0.
 - **Supported Architectures**:
   - `amd64` (`x86_64`)
@@ -143,9 +143,9 @@ Enable personal intercepts based on domain names rather than relying on header-b
 Download and extract the appropriate release for your local machine:
 
 ```sh
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.3/pmz-0.1.3-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.4/pmz-0.1.4-${ARCH}-musl.tar.gz
 
-tar -xf pmz-0.1.3-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.4-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.

@@ -12,7 +12,7 @@ use aya_ebpf::{
 use aya_log_ebpf::{debug, error};
 use common::{DnsHdr, DnsQuery, DnsRecordA, MAX_DNS_NAME_LENGTH};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
-use pmz_ebpf::{class_to_str, record_type_to_str};
+// use pmz_ebpf::{class_to_str, record_type_to_str};
 
 use crate::{context::Context, SERVICE_REGISTRY};
 
@@ -101,13 +101,15 @@ impl<'a> DnsResolver<'a> {
 
         let query_len = self.parse_query(&mut dns_query)?;
 
-        debug!(
-            self.ctx.ctx,
-            "DNS_NAME={} DNS_TYPE={} DNS_CLASS={}",
-            unsafe { str::from_utf8_unchecked(&dns_query.name) },
-            record_type_to_str(dns_query.record_type),
-            class_to_str(dns_query.class),
-        );
+        // TODO: need to check
+        // The BPF verifier rejects the following debug! macro on kernel versions 5.15 and below.
+        // debug!(
+        //     self.ctx.ctx,
+        //     "DNS_NAME={} DNS_TYPE={} DNS_CLASS={}",
+        //     unsafe { str::from_utf8_unchecked(&dns_query.name) },
+        //     record_type_to_str(dns_query.record_type),
+        //     class_to_str(dns_query.class),
+        // );
 
         match unsafe { SERVICE_REGISTRY.get(&dns_query) } {
             Some(a_record) => {
