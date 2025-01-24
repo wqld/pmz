@@ -39,7 +39,7 @@ impl Discovery {
             tokio::select! {
                 Some(next) = stream.next() => {
                     match next {
-                        Ok(event) => self.handle_service_event(event).await,
+                        Ok(event) => self.handle_service_event(event).await?,
                         Err(err) => error!("failed to get next event {err:?}"),
                     }
                 },
@@ -52,14 +52,17 @@ impl Discovery {
         }
     }
 
-    async fn handle_service_event(&self, event: Event<Service>) {
+    async fn handle_service_event(&self, event: Event<Service>) -> Result<()> {
         match event {
             watcher::Event::Apply(svc) | watcher::Event::InitApply(svc) => {
                 let name = svc.name_any();
                 let namespace = svc.namespace().unwrap_or_default();
                 let cluster_ip = svc.spec.unwrap().cluster_ip.unwrap_or_default();
 
-                let a_record = Self::create_a_record(&cluster_ip).unwrap();
+                let a_record = match Self::create_a_record(&cluster_ip) {
+                    Ok(record) => record,
+                    Err(_) => return Ok(()),
+                };
                 let dns_query = Self::create_dns_query(&name, &namespace).unwrap();
 
                 let mut registry = self.service_registry.write().await;
@@ -81,10 +84,12 @@ impl Discovery {
             }
             _ => {}
         }
+
+        Ok(())
     }
 
     fn create_a_record(cluster_ip: &str) -> Result<DnsRecordA> {
-        let ipv4: Ipv4Addr = cluster_ip.parse().unwrap();
+        let ipv4: Ipv4Addr = cluster_ip.parse()?;
 
         Ok(DnsRecordA {
             ip: u32::from(ipv4),

@@ -12,7 +12,7 @@ use common::{NatKey, NatOrigin};
 use memoffset::offset_of;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
 
-use crate::{context::Context, NAT_TABLE};
+use crate::{context::Context, NAT_TABLE, SERVICE_CIDR_MAP};
 
 pub struct TrafficForwarder<'a> {
     ctx: &'a mut Context<'a>,
@@ -38,12 +38,16 @@ impl<'a> TrafficForwarder<'a> {
     }
 
     pub fn handle_ingress(&mut self) -> Result<i32, &'static str> {
-        unsafe {
-            let service_cidr_addr: u32 = 174063616; // 10.96.0.0
-            let subnet_mask: u32 = u32::MAX << (32 - 16);
-            let proxy_addr: u32 = u32::to_be(2130706433); // 127.0.0.1
-            let proxy_port: u16 = u16::to_be(18328);
+        let subnet_mask: u32 = u32::MAX << (32 - 16);
+        let proxy_addr: u32 = u32::to_be(2130706433); // 127.0.0.1
+        let proxy_port: u16 = u16::to_be(18328);
 
+        let service_cidr_addr: u32 = match unsafe { SERVICE_CIDR_MAP.get(&0) } {
+            Some(cidr) => *cidr,
+            None => return Ok(TC_ACT_PIPE),
+        };
+
+        unsafe {
             let dst_addr = (*self.ip_hdr).dst_addr;
             let dst_port = (*self.tcp_hdr).dest;
 
