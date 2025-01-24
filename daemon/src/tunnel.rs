@@ -118,6 +118,7 @@ impl Tunnel {
 
                             if let Ok(httparse::Status::Complete(header_len)) = parser.parse(&chunk)
                             {
+                                debug!("header_len: {header_len}");
                                 if let Some(content_len_val) = headers
                                     .iter()
                                     .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
@@ -125,7 +126,10 @@ impl Tunnel {
                                         String::from_utf8_lossy(h.value).parse::<usize>().ok()
                                     })
                                 {
-                                    total_len = Some(header_len + content_len_val);
+                                    total_len = match http_request.method {
+                                        http::Method::HEAD => Some(header_len),
+                                        _ => Some(header_len + content_len_val),
+                                    };
                                 }
                             }
                         }
@@ -133,6 +137,7 @@ impl Tunnel {
                         debug!("get a chunk: {chunk:?}");
 
                         if let Some(len) = total_len {
+                            debug!("{current_len}/{len}");
                             if len == current_len {
                                 res.send(completed_data.into())
                                     .expect("Failed to send response");
@@ -149,6 +154,7 @@ impl Tunnel {
         debug!("ping");
 
         let http_request = HttpRequest {
+            method: http::Method::GET,
             request: String::new(),
             _source: String::new(),
             target: "127.0.0.1:8101".to_string(),

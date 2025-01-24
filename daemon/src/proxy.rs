@@ -106,10 +106,11 @@ async fn handle_request(
     pmz_target: String,
     tx: Sender<HttpRequest>,
 ) -> Result<Response<Full<Bytes>>> {
-    let request = format_request_as_http(req).await;
+    let (request, method) = format_request_as_http(req).await;
 
     let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<Bytes>();
     tx.send(HttpRequest {
+        method,
         request,
         _source: peer_addr,
         target: pmz_target,
@@ -120,7 +121,7 @@ async fn handle_request(
     Ok(Response::new(Full::new(Bytes::from(oneshot_rx.await?))))
 }
 
-pub async fn format_request_as_http(req: Request<Incoming>) -> String {
+pub async fn format_request_as_http(req: Request<Incoming>) -> (String, http::Method) {
     let (parts, body) = req.into_parts();
     let body = body.collect().await.unwrap().to_bytes();
 
@@ -149,5 +150,8 @@ pub async fn format_request_as_http(req: Request<Incoming>) -> String {
 
     let body = String::from_utf8_lossy(&body);
 
-    format!("{method} {uri} {version}\r\n{headers}\r\n{body}\r\n")
+    (
+        format!("{method} {uri} {version}\r\n{headers}\r\n{body}\r\n"),
+        method,
+    )
 }
