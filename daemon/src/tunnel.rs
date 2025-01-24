@@ -1,3 +1,4 @@
+use core::str;
 use std::{sync::Arc, time::Duration};
 
 use anyhow::Result;
@@ -102,8 +103,43 @@ impl Tunnel {
                 send_stream.send_data(Bytes::from(req), false).unwrap();
 
                 if let Some(res) = http_request.response {
-                    res.send(recv_stream.data().await.unwrap().unwrap())
-                        .unwrap();
+                    let mut total_len: Option<usize> = None;
+                    let mut current_len: usize = 0;
+                    let mut completed_data = Vec::with_capacity(8192);
+
+                    while let Some(chunk) = recv_stream.data().await {
+                        let chunk = chunk.unwrap();
+                        current_len += chunk.len();
+                        completed_data.extend_from_slice(&chunk);
+
+                        if total_len.is_none() {
+                            let mut headers = [httparse::EMPTY_HEADER; 32];
+                            let mut parser = httparse::Response::new(&mut headers);
+
+                            if let Ok(httparse::Status::Complete(header_len)) = parser.parse(&chunk)
+                            {
+                                if let Some(content_len_val) = headers
+                                    .iter()
+                                    .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
+                                    .and_then(|h| {
+                                        String::from_utf8_lossy(h.value).parse::<usize>().ok()
+                                    })
+                                {
+                                    total_len = Some(header_len + content_len_val);
+                                }
+                            }
+                        }
+
+                        debug!("get a chunk: {chunk:?}");
+
+                        if let Some(len) = total_len {
+                            if len == current_len {
+                                res.send(completed_data.into())
+                                    .expect("Failed to send response");
+                                break;
+                            }
+                        }
+                    }
                 }
             })
         });
