@@ -1,6 +1,7 @@
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
 use anyhow::{bail, Result};
+use aya::maps::{HashMap, MapData};
 use ipnet::IpNet;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
@@ -17,6 +18,7 @@ use rsln::{
     },
 };
 use serde_json::json;
+use tokio::sync::RwLock;
 
 pub struct Route {
     netlink: Netlink,
@@ -31,7 +33,9 @@ impl Drop for Route {
 }
 
 impl Route {
-    pub async fn setup_routes() -> Result<Self> {
+    pub async fn setup_routes(
+        service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
+    ) -> Result<Self> {
         let service_cidr = Self::find_service_cidr().await?;
         let service_cidr_net = service_cidr.parse::<IpNet>()?;
         let mut netlink = Netlink::new();
@@ -50,6 +54,14 @@ impl Route {
                 return Err(e);
             }
         }
+
+        let service_cidr_u32: u32 = match service_cidr_net.addr() {
+            std::net::IpAddr::V4(ipv4_addr) => ipv4_addr.into(),
+            std::net::IpAddr::V6(_) => bail!("IPv6 is not supported"),
+        };
+
+        let mut cidr_map = service_cidr_map.write().await;
+        cidr_map.insert(0, service_cidr_u32, 0)?;
 
         Ok(Self {
             netlink,

@@ -28,6 +28,7 @@ impl PrivilegeLevel {
 
         let mut child = command
             .arg("-E")
+            .arg("--preserve-env=PATH")
             .args(&args)
             .stdin(Stdio::inherit())
             .stdout(Stdio::inherit())

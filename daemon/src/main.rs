@@ -61,11 +61,12 @@ async fn main() -> anyhow::Result<()> {
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
     let _ = tc::qdisc_add_clsact(&iface);
+    let _ = tc::qdisc_add_clsact("lo");
+
     let tc_egress: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
     tc_egress.load()?;
     tc_egress.attach(&iface, TcAttachType::Egress)?;
 
-    let _ = tc::qdisc_add_clsact("lo");
     let ingress_forwarder: &mut SchedClassifier =
         ebpf.program_mut("ingress_forwarder").unwrap().try_into()?;
     ingress_forwarder.load()?;
@@ -84,8 +85,11 @@ async fn main() -> anyhow::Result<()> {
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
         HashMap::try_from(ebpf.take_map("SERVICE_REGISTRY").unwrap())?;
 
+    let service_cidr_map: HashMap<_, u8, u32> =
+        HashMap::try_from(ebpf.take_map("SERVICE_CIDR_MAP").unwrap())?;
+
     let proxy = Proxy::new(nat_table, req_tx);
-    let command = Command::new(req_rx, service_registry);
+    let command = Command::new(req_rx, service_registry, service_cidr_map);
 
     tokio::spawn(async move { proxy.start().await });
     tokio::spawn(async move { command.run().await });

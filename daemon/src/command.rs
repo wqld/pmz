@@ -36,6 +36,7 @@ use crate::{
 pub struct Command {
     req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 }
 
@@ -43,10 +44,12 @@ impl Command {
     pub fn new(
         req_rx: Receiver<HttpRequest>,
         service_registry: HashMap<MapData, DnsQuery, DnsRecordA>,
+        service_cidr_map: HashMap<MapData, u8, u32>,
     ) -> Self {
         Self {
             req_rx: Arc::new(Mutex::new(req_rx)),
             service_registry: Arc::new(RwLock::new(service_registry)),
+            service_cidr_map: Arc::new(RwLock::new(service_cidr_map)),
             connection_manager: Arc::new(Mutex::new(ConnectionManager::default())),
         }
     }
@@ -70,6 +73,7 @@ impl Command {
             let (stream, _) = listener.accept().await?;
             let req_rx = self.req_rx.clone();
             let service_registry = self.service_registry.clone();
+            let service_cidr_map = self.service_cidr_map.clone();
             let connection_manager = self.connection_manager.clone();
 
             tokio::task::spawn(async move {
@@ -81,6 +85,7 @@ impl Command {
                                 req,
                                 req_rx.clone(),
                                 service_registry.clone(),
+                                service_cidr_map.clone(),
                                 connection_manager.clone(),
                             )
                         }),
@@ -98,12 +103,21 @@ async fn handle_request(
     req: Request<Incoming>,
     req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     match (req.method(), req.uri().path()) {
         (&Method::POST, "/agent") => deploy_agent(req.into_body()).await,
         (&Method::DELETE, "/agent") => delete_agent().await,
-        (&Method::POST, "/connect") => connect(req_rx, service_registry, connection_manager).await,
+        (&Method::POST, "/connect") => {
+            connect(
+                req_rx,
+                service_registry,
+                service_cidr_map,
+                connection_manager,
+            )
+            .await
+        }
         (&Method::DELETE, "/connect") => disconnect(connection_manager).await,
         (&Method::POST, "/dns") => {
             add_dns(req.into_body(), service_registry, connection_manager).await
@@ -162,6 +176,7 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
 async fn connect(
     req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     let agent_port = 8100; // TODO
@@ -207,7 +222,7 @@ async fn connect(
     let shutdown_forward = shutdown_tx.subscribe();
     let shutdown_tunnel = shutdown_tx.subscribe();
 
-    let route = Route::setup_routes().await?;
+    let route = Route::setup_routes(service_cidr_map).await?;
     let discovery = Discovery::new(service_registry);
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
     let tunnel = Tunnel::new(&tunnel_host, tunnel_port, req_rx);

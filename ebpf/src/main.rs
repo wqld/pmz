@@ -18,6 +18,9 @@ use forwarder::TrafficForwarder;
 use resolver::DnsResolver;
 
 #[map]
+static SERVICE_CIDR_MAP: HashMap<u8, u32> = HashMap::with_max_entries(1, 0);
+
+#[map]
 static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entries(1024, 0);
 
 #[map]
