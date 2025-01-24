@@ -430,6 +430,7 @@ async fn not_found() -> Result<Response<Full<Bytes>>> {
 }
 
 pub struct HttpRequest {
+    pub method: http::Method,
     pub request: String,
     pub _source: String,
     pub target: String,
