@@ -122,6 +122,11 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 `pmz` is planned to support connections to multiple clusters, if feasible.
 
+### Supported protocols
+
+Currently, only the TCP protocol is supported.
+UDP support is planned.
+
 ## Architecture
 
 ![pmz architecture](docs/images/pmz-arch.png)
@@ -143,9 +148,10 @@ Enable personal intercepts based on domain names rather than relying on header-b
 Download and extract the appropriate release for your local machine:
 
 ```sh
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.4/pmz-0.1.4-${ARCH}-musl.tar.gz
-
-tar -xf pmz-0.1.4-${ARCH}-musl.tar.gz
+# x86_64 or aarch64
+export ARCH=$(uname -m)
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.5/pmz-0.1.5-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.5-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.
