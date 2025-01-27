@@ -4,27 +4,21 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
 use common::{NatKey, NatOrigin};
-use http_body_util::{BodyExt, Full};
-use hyper::body::{Bytes, Incoming};
-use hyper::service::service_fn;
-use hyper::{Request, Response};
-use hyper_util::rt::{TokioExecutor, TokioIo};
-use hyper_util::server::conn::auto;
-use log::{debug, error};
+use log::debug;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 
-use crate::HttpRequest;
+use crate::TunnelRequest;
 
 pub struct Proxy {
     nat_table: Arc<RwLock<HashMap<MapData, NatKey, NatOrigin>>>,
-    req_tx: Sender<HttpRequest>,
+    req_tx: Sender<TunnelRequest>,
 }
 
 impl Proxy {
     pub fn new(
         nat_table: HashMap<MapData, NatKey, NatOrigin>,
-        req_tx: Sender<HttpRequest>,
+        req_tx: Sender<TunnelRequest>,
     ) -> Self {
         Self {
             nat_table: Arc::new(RwLock::new(nat_table)),
@@ -70,88 +64,16 @@ impl Proxy {
                 u16::from_be(nat_origin.port)
             );
 
-            let pmz_target = format!(
+            let target = format!(
                 "{}:{}",
                 Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
                 u16::from_be(nat_origin.port)
             );
 
             let tx = self.req_tx.clone();
-
-            tokio::task::spawn(async move {
-                if let Err(e) = auto::Builder::new(TokioExecutor::new())
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(move |req| {
-                            handle_request(
-                                req,
-                                peer_addr.to_string(),
-                                pmz_target.clone(),
-                                tx.clone(),
-                            )
-                        }),
-                    )
-                    .await
-                {
-                    error!("error serving connection: {e:#?}");
-                }
+            tokio::spawn(async move {
+                tx.send(TunnelRequest { stream, target }).await.unwrap();
             });
         }
     }
-}
-
-async fn handle_request(
-    req: Request<Incoming>,
-    peer_addr: String,
-    pmz_target: String,
-    tx: Sender<HttpRequest>,
-) -> Result<Response<Full<Bytes>>> {
-    let (request, method) = format_request_as_http(req).await;
-
-    let (oneshot_tx, oneshot_rx) = tokio::sync::oneshot::channel::<Bytes>();
-    tx.send(HttpRequest {
-        method,
-        request,
-        _source: peer_addr,
-        target: pmz_target,
-        response: Some(oneshot_tx),
-    })
-    .await?;
-
-    Ok(Response::new(Full::new(Bytes::from(oneshot_rx.await?))))
-}
-
-pub async fn format_request_as_http(req: Request<Incoming>) -> (String, http::Method) {
-    let (parts, body) = req.into_parts();
-    let body = body.collect().await.unwrap().to_bytes();
-
-    let method = parts.method;
-    let uri = parts.uri;
-
-    let version = match parts.version {
-        http::Version::HTTP_09 => "HTTP/0.9",
-        http::Version::HTTP_10 => "HTTP/1.0",
-        http::Version::HTTP_11 => "HTTP/1.1",
-        http::Version::HTTP_2 => "HTTP/2.0",
-        http::Version::HTTP_3 => "HTTP/3.0",
-        _ => "HTTP/1.1",
-    };
-
-    let headers: String = parts
-        .headers
-        .into_iter()
-        .map(|(key, value)| {
-            let key = key.unwrap().to_string();
-            let value = value.to_str().unwrap();
-            format!("{key}: {value}")
-        })
-        .collect::<Vec<String>>()
-        .join("\r\n");
-
-    let body = String::from_utf8_lossy(&body);
-
-    (
-        format!("{method} {uri} {version}\r\n{headers}\r\n{body}\r\n"),
-        method,
-    )
 }

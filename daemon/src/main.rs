@@ -3,12 +3,13 @@ use aya::{
     programs::{tc, SchedClassifier, TcAttachType},
 };
 use clap::Parser;
-use command::{Command, HttpRequest};
+use command::Command;
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
 use log::{debug, warn};
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
 use tokio::signal;
+use tunnel::TunnelRequest;
 
 mod command;
 mod connect;
@@ -77,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
     egress_forwarder.load()?;
     egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
-    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<HttpRequest>(1);
+    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<TunnelRequest>(1);
 
     let nat_table: HashMap<_, NatKey, NatOrigin> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
