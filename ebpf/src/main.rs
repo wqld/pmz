@@ -8,7 +8,7 @@ mod resolver;
 use aya_ebpf::{
     bindings::TC_ACT_PIPE,
     macros::{classifier, map},
-    maps::HashMap,
+    maps::{HashMap, LruHashMap},
     programs::TcContext,
 };
 use aya_log_ebpf::error;
@@ -21,10 +21,10 @@ use resolver::DnsResolver;
 static SERVICE_CIDR_MAP: HashMap<u8, u32> = HashMap::with_max_entries(1, 0);
 
 #[map]
-static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entries(1024, 0);
+static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entries(65536, 0);
 
 #[map]
-static NAT_TABLE: HashMap<NatKey, NatOrigin> = HashMap::with_max_entries(1024, 0);
+static NAT_TABLE: LruHashMap<NatKey, NatOrigin> = LruHashMap::with_max_entries(65536, 0);
 
 #[classifier]
 pub fn resolver(mut ctx: TcContext) -> i32 {
