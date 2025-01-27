@@ -105,18 +105,20 @@ impl<'a> TrafficForwarder<'a> {
                     port: dst_port,
                 };
 
-                NAT_TABLE
-                    .insert(&nat_key, &nat_orign, 0)
-                    .map_err(|_| "Failed to insert NAT information to nat table")?;
-
-                debug!(
-                    self.ctx.ctx,
-                    "NatKey inserted src: {}:{} dst: {}:{}",
-                    nat_key.src_addr,
-                    nat_key.src_port,
-                    nat_key.dst_addr,
-                    nat_key.dst_port
-                );
+                match NAT_TABLE.insert(&nat_key, &nat_orign, 0) {
+                    Ok(_) => debug!(
+                        self.ctx.ctx,
+                        "NatKey inserted src: {}:{} dst: {}:{}",
+                        nat_key.src_addr,
+                        nat_key.src_port,
+                        nat_key.dst_addr,
+                        nat_key.dst_port
+                    ),
+                    Err(e) => debug!(
+                        self.ctx.ctx,
+                        "Failed to insert NAT information to nat table: {}", e
+                    ),
+                }
             }
         }
 
