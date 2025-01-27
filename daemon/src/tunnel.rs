@@ -1,8 +1,9 @@
 use core::str;
-use std::{sync::Arc, time::Duration};
+use std::{io::ErrorKind, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use anyhow::Result;
-use h2::client::SendRequest;
+use futures::ready;
+use h2::{client::SendRequest, Reason, RecvStream, SendStream};
 use hyper::body::Bytes;
 use log::debug;
 use rustls::{
@@ -11,25 +12,24 @@ use rustls::{
     ClientConfig, SignatureScheme,
 };
 use tokio::{
+    io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     sync::{broadcast, mpsc::Receiver, Mutex},
     time::Instant,
 };
 use tokio_rustls::TlsConnector;
 
-use crate::HttpRequest;
-
 pub struct Tunnel {
     tunnel_host: String,
     tunnel_port: u16,
-    req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+    req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
 }
 
 impl Tunnel {
     pub fn new(
         tunnel_host: &str,
         tunnel_port: u16,
-        req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+        req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     ) -> Self {
         Self {
             tunnel_host: tunnel_host.to_owned(),
@@ -70,7 +70,7 @@ impl Tunnel {
             );
 
             tokio::select! {
-                Some(http_request) = req_rx.recv() => self.handle_http_request(send_req.clone(), http_request).await,
+                Some(tunnel_req) = req_rx.recv() => self.handle_tunnel_request(send_req.clone(), tunnel_req).await,
                 _ = interval.tick() => self.heartbeat(send_req.clone()).await,
                 _ = shutdown.recv() => {
                     debug!("tunnel shutdown");
@@ -80,11 +80,15 @@ impl Tunnel {
         }
     }
 
-    async fn handle_http_request(&self, send_req: SendRequest<Bytes>, http_request: HttpRequest) {
-        let mut send_req = send_req.clone();
+    async fn handle_tunnel_request(
+        &self,
+        send_req: SendRequest<Bytes>,
+        mut tunnel_req: TunnelRequest,
+    ) {
+        let send_req = send_req.clone();
 
-        tokio::task::spawn(async move {
-            let target = http_request.target;
+        tokio::spawn(async move {
+            let target = tunnel_req.target;
 
             let req = http::Request::builder()
                 .uri(target)
@@ -93,76 +97,166 @@ impl Tunnel {
                 .body(())
                 .unwrap();
 
-            let (response, mut send_stream) = send_req.send_request(req, false).unwrap();
-            let mut recv_stream = response.await.unwrap().into_body();
+            let mut send_req = send_req.ready().await.unwrap();
+            let (resp, send) = send_req.send_request(req, false).unwrap();
+            let recv = resp.await.unwrap().into_body();
 
-            tokio::task::spawn(async move {
-                let req = http_request.request;
+            tokio::spawn(async move {
+                let mut server = TunnelStream { recv, send };
 
-                debug!("req: {:?}", req);
-                send_stream.send_data(Bytes::from(req), false).unwrap();
+                let (from_client, from_server) =
+                    tokio::io::copy_bidirectional(&mut tunnel_req.stream, &mut server)
+                        .await
+                        .unwrap();
 
-                if let Some(res) = http_request.response {
-                    let mut total_len: Option<usize> = None;
-                    let mut current_len: usize = 0;
-                    let mut completed_data = Vec::with_capacity(8192);
-
-                    while let Some(chunk) = recv_stream.data().await {
-                        let chunk = chunk.unwrap();
-                        current_len += chunk.len();
-                        completed_data.extend_from_slice(&chunk);
-
-                        if total_len.is_none() {
-                            let mut headers = [httparse::EMPTY_HEADER; 32];
-                            let mut parser = httparse::Response::new(&mut headers);
-
-                            if let Ok(httparse::Status::Complete(header_len)) = parser.parse(&chunk)
-                            {
-                                debug!("header_len: {header_len}");
-                                if let Some(content_len_val) = headers
-                                    .iter()
-                                    .find(|h| h.name.eq_ignore_ascii_case("Content-Length"))
-                                    .and_then(|h| {
-                                        String::from_utf8_lossy(h.value).parse::<usize>().ok()
-                                    })
-                                {
-                                    total_len = match http_request.method {
-                                        http::Method::HEAD => Some(header_len),
-                                        _ => Some(header_len + content_len_val),
-                                    };
-                                }
-                            }
-                        }
-
-                        debug!("get a chunk: {chunk:?}");
-
-                        if let Some(len) = total_len {
-                            debug!("{current_len}/{len}");
-                            if len == current_len {
-                                res.send(completed_data.into())
-                                    .expect("Failed to send response");
-                                break;
-                            }
-                        }
-                    }
-                }
-            })
+                debug!(
+                    "client wrote {} bytes and received {} bytes",
+                    from_client, from_server
+                );
+            });
         });
     }
 
     async fn heartbeat(&self, send_req: SendRequest<Bytes>) {
-        debug!("ping");
+        let send_req = send_req.clone();
 
-        let http_request = HttpRequest {
-            method: http::Method::GET,
-            request: String::new(),
-            _source: String::new(),
-            target: "127.0.0.1:8101".to_string(),
-            response: None,
+        tokio::spawn(async move {
+            let req = http::Request::builder()
+                .uri("127.0.0.1:8101")
+                .method(http::Method::CONNECT)
+                .version(http::Version::HTTP_2)
+                .body(())
+                .unwrap();
+
+            let mut send_req = send_req.ready().await.unwrap();
+            let (resp, _) = send_req.send_request(req, true).unwrap();
+            let resp = resp.await.unwrap();
+
+            debug!("heartbeat: {}", resp.status());
+        });
+    }
+}
+
+pub struct TunnelRequest {
+    pub stream: TcpStream,
+    pub target: String,
+}
+
+struct TunnelStream {
+    recv: RecvStream,
+    send: SendStream<Bytes>,
+}
+
+impl TunnelStream {
+    fn send_data(&mut self, buf: &[u8], end_of_stream: bool) -> std::result::Result<(), h2::Error> {
+        let bytes = Bytes::copy_from_slice(buf);
+        self.send.send_data(bytes, end_of_stream)
+    }
+
+    fn handle_io_error(e: h2::Error) -> std::io::Error {
+        if e.is_io() {
+            e.into_io().unwrap()
+        } else {
+            std::io::Error::new(std::io::ErrorKind::Other, e)
+        }
+    }
+}
+
+impl AsyncRead for TunnelStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        loop {
+            match ready!(self.recv.poll_data(cx)) {
+                Some(Ok(bytes)) if bytes.is_empty() && !self.recv.is_end_stream() => continue,
+                Some(Ok(bytes)) => {
+                    let _ = self.recv.flow_control().release_capacity(bytes.len());
+                    buf.put_slice(&bytes);
+                    return Poll::Ready(Ok(()));
+                }
+                Some(Err(e)) => {
+                    let err = match e.reason() {
+                        Some(Reason::NO_ERROR) | Some(Reason::CANCEL) => {
+                            return Poll::Ready(Ok(()))
+                        }
+                        Some(Reason::STREAM_CLOSED) => {
+                            std::io::Error::new(std::io::ErrorKind::BrokenPipe, e)
+                        }
+                        _ => TunnelStream::handle_io_error(e),
+                    };
+
+                    return Poll::Ready(Err(err));
+                }
+                None => return Poll::Ready(Ok(())),
+            }
+        }
+    }
+}
+
+impl AsyncWrite for TunnelStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::result::Result<usize, std::io::Error>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        self.send.reserve_capacity(buf.len());
+
+        let cnt = match ready!(self.send.poll_capacity(cx)) {
+            Some(Ok(cnt)) => match self.send_data(&buf[..cnt], false) {
+                _ => Some(cnt),
+            },
+            Some(Err(_)) => None,
+            None => Some(0),
         };
 
-        self.handle_http_request(send_req.clone(), http_request)
-            .await;
+        if let Some(cnt) = cnt {
+            return Poll::Ready(Ok(cnt));
+        }
+
+        let err = match ready!(self.send.poll_reset(cx)) {
+            Ok(Reason::NO_ERROR) | Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                ErrorKind::BrokenPipe.into()
+            }
+            Ok(reason) => TunnelStream::handle_io_error(reason.into()),
+            Err(e) => TunnelStream::handle_io_error(e),
+        };
+
+        Poll::Ready(Err(err))
+    }
+
+    fn poll_flush(
+        self: Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), std::io::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::result::Result<(), std::io::Error>> {
+        let res = self.send_data(&[], true);
+
+        if res.is_ok() {
+            return Poll::Ready(Ok(()));
+        }
+
+        let err = match ready!(self.send.poll_reset(cx)) {
+            Ok(Reason::NO_ERROR) => return Poll::Ready(Ok(())),
+            Ok(Reason::CANCEL) | Ok(Reason::STREAM_CLOSED) => {
+                return Poll::Ready(Err(std::io::ErrorKind::BrokenPipe.into()))
+            }
+            Ok(reason) => TunnelStream::handle_io_error(reason.into()),
+            Err(e) => TunnelStream::handle_io_error(e),
+        };
+
+        Poll::Ready(Err(err))
     }
 }
 

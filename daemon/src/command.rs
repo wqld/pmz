@@ -30,11 +30,11 @@ use crate::{
     discovery::Discovery,
     forward::Forward,
     route::Route,
-    tunnel::Tunnel,
+    tunnel::{Tunnel, TunnelRequest},
 };
 
 pub struct Command {
-    req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+    req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
@@ -42,7 +42,7 @@ pub struct Command {
 
 impl Command {
     pub fn new(
-        req_rx: Receiver<HttpRequest>,
+        req_rx: Receiver<TunnelRequest>,
         service_registry: HashMap<MapData, DnsQuery, DnsRecordA>,
         service_cidr_map: HashMap<MapData, u8, u32>,
     ) -> Self {
@@ -101,7 +101,7 @@ impl Command {
 
 async fn handle_request(
     req: Request<Incoming>,
-    req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+    req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
@@ -174,7 +174,7 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
 }
 
 async fn connect(
-    req_rx: Arc<Mutex<Receiver<HttpRequest>>>,
+    req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
@@ -427,12 +427,4 @@ async fn not_found() -> Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Full::<Bytes>::from("Not found"))?)
-}
-
-pub struct HttpRequest {
-    pub method: http::Method,
-    pub request: String,
-    pub _source: String,
-    pub target: String,
-    pub response: Option<tokio::sync::oneshot::Sender<Bytes>>,
 }
