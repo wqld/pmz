@@ -1,4 +1,12 @@
-use std::{fs, net::Ipv4Addr, os::unix::fs::PermissionsExt, path::Path, sync::Arc, time::Duration};
+use std::{
+    fs::{self, File},
+    io::Write,
+    net::Ipv4Addr,
+    os::unix::fs::PermissionsExt,
+    path::Path,
+    sync::Arc,
+    time::Duration,
+};
 
 use anyhow::Result;
 use aya::maps::{HashMap, MapData};
@@ -12,7 +20,7 @@ use hyper::{
     Response,
 };
 use hyper_util::rt::TokioIo;
-use k8s_openapi::api::core::v1::{Pod, Service};
+use k8s_openapi::api::core::v1::{Pod, Secret, Service};
 use kube::{
     api::Api,
     runtime::wait::{await_condition, conditions::is_pod_running},
@@ -212,6 +220,32 @@ async fn connect(
         };
 
     debug!("Checking if agent is running: {agent_name:?}");
+
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &agent_namespace);
+
+    let pmz_tls = secrets.get("pmz-tls").await?;
+
+    if let Some(data) = pmz_tls.data {
+        if let Some(crt) = data.get("tls.crt") {
+            let home_dir = std::env::var("HOME")?;
+            let cert_dir = Path::new(&home_dir).join(".config/pmz/certs");
+            std::fs::create_dir_all(&cert_dir)?;
+
+            let cert_path = cert_dir.join("pmz.crt");
+            let mut cert_file = File::create(cert_path)?;
+            cert_file.write_all(&crt.0)?;
+        } else {
+            return Ok(Response::builder().status(StatusCode::NOT_FOUND).body(
+                Full::<Bytes>::from("pmz-tls secret doesn't have a tls.crt field."),
+            )?);
+        }
+    } else {
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .body(Full::<Bytes>::from(
+                "pmz-tls secret doesn't have a data attribute.",
+            ))?);
+    }
 
     let pods: Api<Pod> = Api::namespaced(client.clone(), &agent_namespace);
     let running = await_condition(pods.clone(), &agent_name, is_pod_running());

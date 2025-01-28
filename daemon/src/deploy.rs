@@ -1,5 +1,3 @@
-use std::{fs::File, io::Write, path::Path};
-
 use anyhow::{bail, Result};
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -148,15 +146,6 @@ impl<'a> Deploy<'a> {
     fn generate_self_signed() -> Result<(String, String)> {
         let CertifiedKey { cert, key_pair } =
             generate_simple_self_signed(vec!["localhost".to_string()])?;
-
-        let home_dir = std::env::var("HOME")?;
-        let home_path = Path::new(&home_dir);
-        let cert_dir = home_path.join(".config/pmz/certs");
-        std::fs::create_dir_all(&cert_dir)?;
-
-        let cert_path = cert_dir.join("pmz.crt");
-        let mut cert_file = File::create(cert_path)?;
-        cert_file.write_all(&cert.pem().into_bytes())?;
 
         Ok((cert.pem(), key_pair.serialize_pem()))
     }

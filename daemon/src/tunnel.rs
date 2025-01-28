@@ -1,15 +1,22 @@
 use core::str;
-use std::{io::ErrorKind, pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{io::ErrorKind, path::Path, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use anyhow::Result;
 use futures::ready;
 use h2::{client::SendRequest, Reason, RecvStream, SendStream};
 use hyper::body::Bytes;
-use log::debug;
+use log::{debug, error};
 use rustls::{
-    client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
-    pki_types::{CertificateDer, ServerName},
-    ClientConfig, SignatureScheme,
+    client::{
+        danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
+        verify_server_name,
+    },
+    crypto::{
+        aws_lc_rs, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
+    },
+    pki_types::{pem::PemObject, CertificateDer, ServerName},
+    server::ParsedCertificate,
+    CertificateError, ClientConfig, SignatureScheme,
 };
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -44,7 +51,7 @@ impl Tunnel {
 
         let mut client_config = ClientConfig::builder()
             .dangerous()
-            .with_custom_certificate_verifier(NoVerifier::new())
+            .with_custom_certificate_verifier(PmzCertVerifier::new())
             .with_no_client_auth();
         client_config.alpn_protocols = vec![b"h2".to_vec()];
         let tls_connector = TlsConnector::from(Arc::new(client_config));
@@ -261,57 +268,80 @@ impl AsyncWrite for TunnelStream {
 }
 
 #[derive(Debug)]
-struct NoVerifier;
+struct PmzCertVerifier {
+    supported: WebPkiSupportedAlgorithms,
+}
 
-impl NoVerifier {
+impl PmzCertVerifier {
     fn new() -> Arc<Self> {
-        Arc::new(Self)
+        Arc::new(Self {
+            supported: aws_lc_rs::default_provider().signature_verification_algorithms,
+        })
     }
 }
 
-impl ServerCertVerifier for NoVerifier {
-    fn requires_raw_public_keys(&self) -> bool {
-        false
-    }
-
+impl ServerCertVerifier for PmzCertVerifier {
     fn verify_server_cert(
         &self,
-        _end_entity: &CertificateDer<'_>,
+        end_entity: &CertificateDer<'_>,
         _intermediates: &[CertificateDer<'_>],
-        _server_name: &ServerName<'_>,
+        server_name: &ServerName<'_>,
         _ocsp_response: &[u8],
-        _now: rustls::pki_types::UnixTime,
+        now: rustls::pki_types::UnixTime,
     ) -> std::result::Result<ServerCertVerified, rustls::Error> {
-        Ok(ServerCertVerified::assertion())
+        debug!("end entity: {end_entity:?}");
+        debug!("server name: {server_name:?}");
+        debug!("now: {now:?}");
+
+        let home_dir = std::env::var("HOME").expect("Failed to retrieve HOME env.");
+        let cert_path = Path::new(&home_dir).join(".config/pmz/certs/pmz.crt");
+
+        match CertificateDer::from_pem_file(&cert_path) {
+            Ok(local_entity) => {
+                debug!("Local certificate loaded from: {:?}", cert_path);
+
+                if local_entity.eq(end_entity) {
+                    let cert = ParsedCertificate::try_from(end_entity)?;
+                    verify_server_name(&cert, server_name)?;
+                    debug!("Certificate verified successfully.");
+                    Ok(ServerCertVerified::assertion())
+                } else {
+                    error!(
+                        "Certificate mismatch. Expected: {:?}, Received: {:?}",
+                        local_entity, end_entity
+                    );
+                    Err(CertificateError::BadEncoding.into())
+                }
+            }
+            Err(e) => {
+                error!(
+                    "Failed to load local certificate from {:?}: {}",
+                    cert_path, e
+                );
+                Err(CertificateError::ApplicationVerificationFailure.into())
+            }
+        }
     }
 
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls12_signature(message, cert, dss, &self.supported)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> std::result::Result<HandshakeSignatureValid, rustls::Error> {
-        Ok(HandshakeSignatureValid::assertion())
+        verify_tls13_signature(message, cert, dss, &self.supported)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        vec![
-            SignatureScheme::ECDSA_NISTP521_SHA512,
-            SignatureScheme::ECDSA_NISTP384_SHA384,
-            SignatureScheme::ECDSA_NISTP256_SHA256,
-            SignatureScheme::RSA_PSS_SHA512,
-            SignatureScheme::RSA_PSS_SHA384,
-            SignatureScheme::RSA_PSS_SHA256,
-            SignatureScheme::ED25519,
-        ]
+        self.supported.supported_schemes()
     }
 }
