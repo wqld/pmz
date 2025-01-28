@@ -72,7 +72,12 @@ impl Proxy {
 
             let tx = self.req_tx.clone();
             tokio::spawn(async move {
-                tx.send(TunnelRequest { stream, target }).await.unwrap();
+                tx.send(TunnelRequest {
+                    stream: Box::new(stream),
+                    target,
+                })
+                .await
+                .unwrap();
             });
         }
     }

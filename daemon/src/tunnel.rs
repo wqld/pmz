@@ -144,8 +144,12 @@ impl Tunnel {
     }
 }
 
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<T> Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+
 pub struct TunnelRequest {
-    pub stream: TcpStream,
+    pub stream: Box<dyn Stream>,
     pub target: String,
 }
 
