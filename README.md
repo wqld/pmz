@@ -124,8 +124,7 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 ### Supported protocols
 
-Currently, only the TCP protocol is supported.
-UDP support is planned.
+Both TCP and UDP are supported.
 
 ## Architecture
 
@@ -150,8 +149,8 @@ Download and extract the appropriate release for your local machine:
 ```sh
 # x86_64 or aarch64
 export ARCH=$(uname -m)
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.5/pmz-0.1.5-${ARCH}-musl.tar.gz
-tar -xf pmz-0.1.5-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.6/pmz-0.1.6-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.6-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.

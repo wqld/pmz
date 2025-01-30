@@ -69,13 +69,8 @@ fn try_forward_ingress(ctx: &mut TcContext) -> Result<i32, &'static str> {
         _ => return Ok(TC_ACT_PIPE),
     };
 
-    match ctx.kind {
-        Some(Kind::TCP) => {
-            let mut traffic_forwarder = TrafficForwarder::new(&mut ctx);
-            traffic_forwarder.handle_ingress()
-        }
-        _ => Ok(TC_ACT_PIPE),
-    }
+    let mut forwarder = TrafficForwarder::new(&mut ctx);
+    forwarder.handle_ingress()
 }
 
 #[classifier]
@@ -95,13 +90,8 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
         _ => return Ok(TC_ACT_PIPE),
     };
 
-    match ctx.kind {
-        Some(Kind::TCP) => {
-            let mut traffic_forwarder = TrafficForwarder::new(&mut ctx);
-            traffic_forwarder.handle_egress()
-        }
-        _ => Ok(TC_ACT_PIPE),
-    }
+    let mut forwarder = TrafficForwarder::new(&mut ctx);
+    forwarder.handle_egress()
 }
 
 #[cfg(not(test))]

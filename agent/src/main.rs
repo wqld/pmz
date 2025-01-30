@@ -20,6 +20,25 @@ use rustls::ServerConfig;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+use udp_stream::UdpStream;
+
+static PMZ_PROTO_HDR: &str = "Pmz-Proto";
+static PROTO_UDP: &str = "UDP";
+
+enum PROTO {
+    TCP,
+    UDP,
+}
+
+impl PROTO {
+    pub fn from(s: &str) -> Self {
+        if s.eq(PROTO_UDP) {
+            return PROTO::UDP;
+        }
+
+        PROTO::TCP
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -114,10 +133,17 @@ async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::
 async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     debug!("handle_connect: {:?}", req);
     if let Some(addr) = host_addr(req.uri()) {
+        let proto = req
+            .headers()
+            .get(PMZ_PROTO_HDR)
+            .and_then(|hdr_val| hdr_val.to_str().ok())
+            .map(|proto| PROTO::from(proto))
+            .unwrap_or_else(|| PROTO::TCP);
+
         tokio::task::spawn(async move {
             match hyper::upgrade::on(req).await {
                 Ok(upgraded) => {
-                    if let Err(e) = tunnel(upgraded, addr).await {
+                    if let Err(e) = tunnel(upgraded, addr, proto).await {
                         error!("server io error: {}", e);
                     };
                 }
@@ -136,7 +162,7 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes
 }
 
 async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
-    debug!("handle_http: {:?}", req.uri());
+    debug!("handle_http: {:?}", req);
 
     let host = req.uri().host().expect("uri has no host");
     let port = req.uri().port_u16().unwrap_or(80);
@@ -159,18 +185,25 @@ async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, h
     Ok(resp.map(|b| b.boxed()))
 }
 
-async fn tunnel(upgraded: Upgraded, addr: String) -> io::Result<()> {
+async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()> {
     debug!("tunnel addr: {:?}", addr);
     debug!("upgraded: {:?}", upgraded);
 
-    let mut server = TcpStream::connect(addr).await?;
     let mut upgraded = TokioIo::new(upgraded);
 
-    let (from_client, from_server) =
-        tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?;
+    let (from_client, from_server) = match proto {
+        PROTO::TCP => {
+            let mut server = TcpStream::connect(addr).await?;
+            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?
+        }
+        PROTO::UDP => {
+            let mut server = UdpStream::connect(addr.parse::<SocketAddr>().unwrap()).await?;
+            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?
+        }
+    };
 
     debug!(
-        "client wrote {} bytes and received {} bytes",
+        "tcp client wrote {} bytes and received {} bytes",
         from_client, from_server
     );
 

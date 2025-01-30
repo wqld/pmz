@@ -1,5 +1,5 @@
 use core::str;
-use std::{io::ErrorKind, path::Path, pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{fmt::Debug, io::ErrorKind, path::Path, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use anyhow::Result;
 use futures::ready;
@@ -25,6 +25,8 @@ use tokio::{
     time::Instant,
 };
 use tokio_rustls::TlsConnector;
+
+static PMZ_PROTO_HDR: &str = "Pmz-Proto";
 
 pub struct Tunnel {
     tunnel_host: String,
@@ -101,6 +103,7 @@ impl Tunnel {
                 .uri(target)
                 .method(http::Method::CONNECT)
                 .version(http::Version::HTTP_2)
+                .header(PMZ_PROTO_HDR, tunnel_req.protocol)
                 .body(())
                 .unwrap();
 
@@ -149,6 +152,7 @@ pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
 impl<T> Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
 pub struct TunnelRequest {
+    pub protocol: &'static str,
     pub stream: Box<dyn Stream>,
     pub target: String,
 }

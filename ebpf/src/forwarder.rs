@@ -10,9 +10,12 @@ use aya_ebpf::{
 use aya_log_ebpf::debug;
 use common::{NatKey, NatOrigin};
 use memoffset::offset_of;
-use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr};
+use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
-use crate::{context::Context, NAT_TABLE, SERVICE_CIDR_MAP};
+use crate::{
+    context::{Context, Kind},
+    NAT_TABLE, SERVICE_CIDR_MAP,
+};
 
 pub struct TrafficForwarder<'a> {
     ctx: &'a mut Context<'a>,
@@ -38,9 +41,13 @@ impl<'a> TrafficForwarder<'a> {
     }
 
     pub fn handle_ingress(&mut self) -> Result<i32, &'static str> {
-        let subnet_mask: u32 = u32::MAX << (32 - 16);
-        let proxy_addr: u32 = u32::to_be(2130706433); // 127.0.0.1
-        let proxy_port: u16 = u16::to_be(18328);
+        let subnet_mask: u32 = 4294901760; // u32::MAX << (32 - 16)
+        let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
+        let (kind, proxy_port) = match self.kind {
+            Some(Kind::TCP) => (Kind::TCP, 38983 /* 18328 */),
+            Some(Kind::UDP) => (Kind::UDP, 38727 /* 18327 */),
+            _ => return Ok(TC_ACT_PIPE),
+        };
 
         let service_cidr_addr: u32 = match unsafe { SERVICE_CIDR_MAP.get(&0) } {
             Some(cidr) => *cidr,
@@ -48,77 +55,20 @@ impl<'a> TrafficForwarder<'a> {
         };
 
         unsafe {
-            let dst_addr = (*self.ip_hdr).dst_addr;
-            let dst_port = (*self.tcp_hdr).dest;
+            let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
+            let (src_port, dst_port) = match kind {
+                Kind::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
+                Kind::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                _ => return Ok(TC_ACT_PIPE),
+            };
 
             let network_addr = service_cidr_addr & subnet_mask;
             let masked_addr = u32::from_be(dst_addr) & subnet_mask;
 
             if network_addr == masked_addr {
-                let src_addr = (*self.ip_hdr).src_addr;
-                let src_port = (*self.tcp_hdr).source;
-
-                let syn = (*self.tcp_hdr).syn();
-                let ack = (*self.tcp_hdr).ack();
-                let psh = (*self.tcp_hdr).psh();
-                let fin = (*self.tcp_hdr).fin();
-
-                debug!(
-                    self.ctx.ctx,
-                    "ingress src: {:i}:{}, dst: {:i}:{}->{:i}:{} {}/{}/{}/{}",
-                    u32::from_be(src_addr),
-                    u16::from_be(src_port),
-                    u32::from_be(dst_addr),
-                    u16::from_be(dst_port),
-                    u32::from_be(proxy_addr),
-                    u16::from_be(proxy_port),
-                    (u16::from_be(syn) != 0) as u8,
-                    (u16::from_be(ack) != 0) as u8,
-                    (u16::from_be(psh) != 0) as u8,
-                    (u16::from_be(fin) != 0) as u8,
+                return self.dnat(
+                    kind, src_addr, src_port, dst_addr, dst_port, proxy_addr, proxy_port,
                 );
-
-                self.nat_v4_rewrite_headers(
-                    dst_addr,
-                    proxy_addr,
-                    offset_of!(Ipv4Hdr, dst_addr),
-                    dst_port,
-                    proxy_port,
-                    offset_of!(TcpHdr, dest),
-                )?;
-
-                let nat_key = NatKey {
-                    src_addr,
-                    dst_addr: proxy_addr,
-                    src_port,
-                    dst_port: proxy_port,
-                };
-
-                match NAT_TABLE.get(&nat_key) {
-                    Some(_) => return Ok(TC_ACT_PIPE),
-                    None => {}
-                };
-
-                let nat_orign = NatOrigin {
-                    addr: dst_addr,
-                    dummy: 0,
-                    port: dst_port,
-                };
-
-                match NAT_TABLE.insert(&nat_key, &nat_orign, 0) {
-                    Ok(_) => debug!(
-                        self.ctx.ctx,
-                        "NatKey inserted src: {}:{} dst: {}:{}",
-                        nat_key.src_addr,
-                        nat_key.src_port,
-                        nat_key.dst_addr,
-                        nat_key.dst_port
-                    ),
-                    Err(e) => debug!(
-                        self.ctx.ctx,
-                        "Failed to insert NAT information to nat table: {}", e
-                    ),
-                }
             }
         }
 
@@ -127,58 +77,151 @@ impl<'a> TrafficForwarder<'a> {
 
     pub fn handle_egress(&mut self) -> Result<i32, &'static str> {
         unsafe {
-            let proxy_addr: u32 = u32::to_be(2130706433); // 127.0.0.1
-            let proxy_port: u16 = u16::to_be(18328);
+            let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
+            let (kind, proxy_port) = match self.kind {
+                Some(Kind::TCP) => (Kind::TCP, 38983 /* 18328 */),
+                Some(Kind::UDP) => (Kind::UDP, 38727 /* 18327 */),
+                _ => return Ok(TC_ACT_PIPE),
+            };
 
-            let src_addr = (*self.ip_hdr).src_addr;
-            let src_port = (*self.tcp_hdr).source;
+            let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
+            let (src_port, dst_port) = match kind {
+                Kind::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
+                Kind::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                _ => return Ok(TC_ACT_PIPE),
+            };
 
             if src_addr == proxy_addr && src_port == proxy_port {
-                let dst_addr = (*self.ip_hdr).dst_addr;
-                let dst_port = (*self.tcp_hdr).dest;
-
-                let nat_key = NatKey {
-                    src_addr: dst_addr,
-                    src_port: dst_port,
-                    dst_addr: src_addr,
-                    dst_port: src_port,
-                };
-
-                let nat_origin = match NAT_TABLE.get(&nat_key) {
-                    Some(origin) => origin,
-                    None => return Ok(TC_ACT_PIPE),
-                };
-
-                let syn = (*self.tcp_hdr).syn();
-                let ack = (*self.tcp_hdr).ack();
-                let psh = (*self.tcp_hdr).psh();
-                let fin = (*self.tcp_hdr).fin();
-
-                debug!(
-                    self.ctx.ctx,
-                    "egress src: {:i}:{}->{:i}:{}, dst: {:i}:{} {}/{}/{}/{}",
-                    u32::from_be(src_addr),
-                    u16::from_be(src_port),
-                    u32::from_be(nat_origin.addr),
-                    u16::from_be(nat_origin.port),
-                    u32::from_be(dst_addr),
-                    u16::from_be(dst_port),
-                    (u16::from_be(syn) != 0) as u8,
-                    (u16::from_be(ack) != 0) as u8,
-                    (u16::from_be(psh) != 0) as u8,
-                    (u16::from_be(fin) != 0) as u8,
-                );
-
-                self.nat_v4_rewrite_headers(
-                    src_addr,
-                    nat_origin.addr,
-                    offset_of!(Ipv4Hdr, src_addr),
-                    src_port,
-                    nat_origin.port,
-                    offset_of!(TcpHdr, source),
-                )?;
+                return self.snat(kind, src_addr, src_port, dst_addr, dst_port);
             }
         }
+
+        Ok(TC_ACT_PIPE)
+    }
+
+    #[inline(always)]
+    unsafe fn dnat(
+        &mut self,
+        kind: Kind,
+        src_addr: u32,
+        src_port: u16,
+        dst_addr: u32,
+        dst_port: u16,
+        proxy_addr: u32,
+        proxy_port: u16,
+    ) -> Result<i32, &'static str> {
+        debug!(
+            self.ctx.ctx,
+            "{} ingress src: {:i}:{}, dst: {:i}:{}->{:i}:{}",
+            kind.kind(),
+            u32::from_be(src_addr),
+            u16::from_be(src_port),
+            u32::from_be(dst_addr),
+            u16::from_be(dst_port),
+            u32::from_be(proxy_addr),
+            u16::from_be(proxy_port),
+        );
+
+        let (port_offset, csum_offset) = match kind {
+            Kind::TCP => (offset_of!(TcpHdr, dest), offset_of!(TcpHdr, check)),
+            Kind::UDP => (offset_of!(UdpHdr, dest), offset_of!(UdpHdr, check)),
+            _ => return Ok(TC_ACT_PIPE),
+        };
+
+        self.nat_v4_rewrite_headers(
+            dst_addr,
+            proxy_addr,
+            offset_of!(Ipv4Hdr, dst_addr),
+            dst_port,
+            proxy_port,
+            port_offset,
+            csum_offset,
+        )?;
+
+        let nat_key = NatKey {
+            src_addr,
+            dst_addr: proxy_addr,
+            src_port,
+            dst_port: proxy_port,
+        };
+
+        match NAT_TABLE.get(&nat_key) {
+            Some(_) => return Ok(TC_ACT_PIPE),
+            None => {}
+        };
+
+        let nat_orign = NatOrigin {
+            addr: dst_addr,
+            dummy: 0,
+            port: dst_port,
+        };
+
+        match NAT_TABLE.insert(&nat_key, &nat_orign, 0) {
+            Ok(_) => debug!(
+                self.ctx.ctx,
+                "NatKey inserted src: {:i}:{} dst: {:i}:{}",
+                u32::from_be(src_addr),
+                u16::from_be(src_port),
+                u32::from_be(dst_addr),
+                u16::from_be(dst_port),
+            ),
+            Err(e) => debug!(
+                self.ctx.ctx,
+                "Failed to insert NAT information to nat table: {}", e
+            ),
+        }
+
+        Ok(TC_ACT_PIPE)
+    }
+
+    #[inline(always)]
+    unsafe fn snat(
+        &mut self,
+        kind: Kind,
+        src_addr: u32,
+        src_port: u16,
+        dst_addr: u32,
+        dst_port: u16,
+    ) -> Result<i32, &'static str> {
+        let nat_key = NatKey {
+            src_addr: dst_addr,
+            src_port: dst_port,
+            dst_addr: src_addr,
+            dst_port: src_port,
+        };
+
+        let nat_origin = match NAT_TABLE.get(&nat_key) {
+            Some(origin) => origin,
+            None => return Ok(TC_ACT_PIPE),
+        };
+
+        debug!(
+            self.ctx.ctx,
+            "{} egress src: {:i}:{}->{:i}:{}, dst: {:i}:{}",
+            kind.kind(),
+            u32::from_be(src_addr),
+            u16::from_be(src_port),
+            u32::from_be(nat_origin.addr),
+            u16::from_be(nat_origin.port),
+            u32::from_be(dst_addr),
+            u16::from_be(dst_port),
+        );
+
+        let (port_offset, csum_offset) = match kind {
+            Kind::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
+            Kind::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
+            _ => return Ok(TC_ACT_PIPE),
+        };
+
+        self.nat_v4_rewrite_headers(
+            src_addr,
+            nat_origin.addr,
+            offset_of!(Ipv4Hdr, src_addr),
+            src_port,
+            nat_origin.port,
+            port_offset,
+            csum_offset,
+        )?;
 
         Ok(TC_ACT_PIPE)
     }
@@ -192,6 +235,7 @@ impl<'a> TrafficForwarder<'a> {
         old_port: u16,
         new_port: u16,
         port_offset: usize,
+        l4_csum_offset: usize,
     ) -> Result<(), &'static str> {
         let sum = unsafe {
             bpf_csum_diff(
@@ -207,7 +251,7 @@ impl<'a> TrafficForwarder<'a> {
             .map_err(|_| "Failed to store the updated address")?;
 
         self.l4_csum_replace(
-            EthHdr::LEN + Ipv4Hdr::LEN + offset_of!(TcpHdr, check),
+            EthHdr::LEN + Ipv4Hdr::LEN + l4_csum_offset,
             old_port as u64,
             new_port as u64,
             mem::size_of_val(&new_port) as u64,
@@ -218,7 +262,7 @@ impl<'a> TrafficForwarder<'a> {
             .map_err(|_| "Failed to store the updated port value")?;
 
         self.l4_csum_replace(
-            EthHdr::LEN + Ipv4Hdr::LEN + offset_of!(TcpHdr, check),
+            EthHdr::LEN + Ipv4Hdr::LEN + l4_csum_offset,
             0,
             sum,
             BPF_F_PSEUDO_HDR as u64,

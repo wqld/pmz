@@ -13,9 +13,25 @@ use network_types::{
     udp::UdpHdr,
 };
 
+#[derive(PartialEq, Eq)]
 pub enum Kind {
     DNS,
     TCP,
+    UDP,
+}
+
+static KIND_DNS: &str = "DNS";
+static KIND_TCP: &str = "TCP";
+static KIND_UDP: &str = "UDP";
+
+impl Kind {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Kind::DNS => KIND_DNS,
+            Kind::TCP => KIND_TCP,
+            Kind::UDP => KIND_UDP,
+        }
+    }
 }
 
 pub struct Context<'a> {
@@ -69,14 +85,14 @@ impl<'a> Context<'a> {
 
         match unsafe { (*ctx.ip_hdr).proto } {
             IpProto::Udp => {
-                ctx.kind = Some(Kind::DNS);
                 ctx.udp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
-
-                if (unsafe { *ctx.udp_hdr }).dest != u16::to_be(53) {
-                    return Err(());
-                }
-
-                ctx.dns_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+                ctx.kind = match (unsafe { *ctx.udp_hdr }).dest {
+                    13568 /* 53 */ => {
+                        ctx.dns_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
+                        Some(Kind::DNS)
+                    }
+                    _ => Some(Kind::UDP),
+                };
             }
             IpProto::Tcp => {
                 ctx.kind = Some(Kind::TCP);
