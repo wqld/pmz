@@ -27,6 +27,12 @@ const DNS_PAYLOAD_OFFSET: usize = EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN + DNS
 const RECORD_TYPE_OFFSET: usize = 1;
 const CLASS_OFFSET: usize = 3;
 
+enum DnsNameStage {
+    INIT,
+    LABEL,
+    NAME(u8),
+}
+
 #[repr(C, packed)]
 #[derive(Copy, Clone)]
 pub struct DnsAnswer {
@@ -176,10 +182,9 @@ impl<'a> DnsResolver<'a> {
     #[inline(always)]
     fn parse_query(&self, dns_query: &mut DnsQuery) -> Result<usize, &'static str> {
         let data_end = self.data_end() as usize;
+        let mut dns_name_sate = DnsNameStage::INIT;
         let mut data_idx = DNS_PAYLOAD_OFFSET;
         let mut name_idx = 0;
-        let mut label_idx = 0;
-        let mut label_len = None;
 
         while name_idx < MAX_DNS_NAME_LENGTH {
             if data_idx + 1 > data_end {
@@ -198,24 +203,22 @@ impl<'a> DnsResolver<'a> {
                 break;
             }
 
-            label_len = match label_len {
-                Some(len) if len == 0 => {
+            dns_name_sate = match dns_name_sate {
+                DnsNameStage::INIT => DnsNameStage::NAME(c),
+                DnsNameStage::LABEL => {
                     dns_query.name[name_idx] = b'.';
                     name_idx += 1;
-                    label_idx = 0;
-                    Some(c)
+                    DnsNameStage::NAME(c)
                 }
-                Some(len) => {
+                DnsNameStage::NAME(len) => {
                     dns_query.name[name_idx] = c;
                     name_idx += 1;
-                    label_idx += 1;
-
-                    match label_idx == len {
-                        true => Some(0),
-                        false => Some(len),
+                    if len - 1 == 0 {
+                        DnsNameStage::LABEL
+                    } else {
+                        DnsNameStage::NAME(len - 1)
                     }
                 }
-                None => Some(c),
             };
 
             data_idx += 1;
