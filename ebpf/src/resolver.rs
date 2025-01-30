@@ -173,15 +173,16 @@ impl<'a> DnsResolver<'a> {
         (*self.dns_hdr).additional_count = 0u16.to_be();
     }
 
+    #[inline(always)]
     fn parse_query(&self, dns_query: &mut DnsQuery) -> Result<usize, &'static str> {
         let data_end = self.data_end() as usize;
-        let mut cur_data_idx = DNS_PAYLOAD_OFFSET;
+        let mut data_idx = DNS_PAYLOAD_OFFSET;
         let mut name_idx = 0;
-        let mut cur_label_len = None;
-        let mut cur_label_idx = 0;
+        let mut label_idx = 0;
+        let mut label_len = None;
 
         while name_idx < MAX_DNS_NAME_LENGTH {
-            if cur_data_idx + 1 > data_end {
+            if data_idx + 1 > data_end {
                 error!(
                     self.ctx.ctx,
                     "boundary exceeded while parsing DNS query name"
@@ -190,49 +191,53 @@ impl<'a> DnsResolver<'a> {
             }
 
             let c: u8 = self
-                .load(cur_data_idx)
+                .load(data_idx)
                 .map_err(|_| "failed to read DNS query name byte")?;
 
             if c == 0 {
                 break;
             }
 
-            if let Some(label_len) = cur_label_len {
-                if cur_label_idx == label_len as usize {
+            label_len = match label_len {
+                Some(len) if len == 0 => {
                     dns_query.name[name_idx] = b'.';
-                    cur_label_len = None;
-                    cur_label_idx = 0;
                     name_idx += 1;
-                    continue;
+                    label_idx = 0;
+                    Some(c)
                 }
+                Some(len) => {
+                    dns_query.name[name_idx] = c;
+                    name_idx += 1;
+                    label_idx += 1;
 
-                dns_query.name[name_idx] = c;
-                cur_label_idx += 1;
-                name_idx += 1;
-            } else {
-                cur_label_len = Some(c);
-            }
+                    match label_idx == len {
+                        true => Some(0),
+                        false => Some(len),
+                    }
+                }
+                None => Some(c),
+            };
 
-            cur_data_idx += 1;
+            data_idx += 1;
         }
 
-        if (cur_data_idx + 5) > data_end {
+        if (data_idx + 5) > data_end {
             error!(
                 self.ctx.ctx,
                 "boundary exceeded while retrieving DNS record type and class"
             );
         } else {
             let record_type: u16 = self
-                .load(cur_data_idx + RECORD_TYPE_OFFSET)
+                .load(data_idx + RECORD_TYPE_OFFSET)
                 .map_err(|_| "failed to read record type")?;
             let class: u16 = self
-                .load(cur_data_idx + CLASS_OFFSET)
+                .load(data_idx + CLASS_OFFSET)
                 .map_err(|_| "failed to read class")?;
 
             dns_query.record_type = u16::from_be(record_type);
             dns_query.class = u16::from_be(class);
         }
 
-        Ok(cur_data_idx + 1 + 2 + 2 - DNS_PAYLOAD_OFFSET)
+        Ok(data_idx + 1 + 2 + 2 - DNS_PAYLOAD_OFFSET)
     }
 }
