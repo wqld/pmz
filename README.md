@@ -136,8 +136,7 @@ Both TCP and UDP are supported.
 
 `pmz` utilizes eBPF, requiring the following system specifications:
 
-- **Linux Kernel**: 5.15 or higher
-  - I am also testing on older kernels like version 5.4.0.
+- **Linux Kernel**: 5.4 or higher
 - **Supported Architectures**:
   - `amd64` (`x86_64`)
   - `arm64` (`aarch64`)
@@ -149,8 +148,8 @@ Download and extract the appropriate release for your local machine:
 ```sh
 # x86_64 or aarch64
 export ARCH=$(uname -m)
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.6/pmz-0.1.6-${ARCH}-musl.tar.gz
-tar -xf pmz-0.1.6-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.7/pmz-0.1.7-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.7-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.
