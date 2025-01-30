@@ -2,7 +2,7 @@ FROM --platform=$BUILDPLATFORM rust:1 AS builder
 
 # cargo build --release --target aarch64-unknown-linux-musl -p agent
 # cargo build --release --target x86_64-unknown-linux-musl -p agent
-# docker build --push --platform linux/amd64,linux/arm64 -t ghcr.io/wqld/pmz-agent:0.1.1 .
+# docker build --push --platform linux/amd64,linux/arm64 -t ghcr.io/wqld/pmz-agent:0.1.0 .
 
 ARG TARGETPLATFORM
 ARG BUILDPLATFORM

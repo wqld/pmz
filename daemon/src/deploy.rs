@@ -93,7 +93,7 @@ impl<'a> Deploy<'a> {
                     "spec": {
                         "containers": [{
                             "name": AGENT_APP_NAME,
-                            "image": "ghcr.io/wqld/pmz-agent:0.1.1",
+                            "image": "ghcr.io/wqld/pmz-agent:0.1.0",
                             "ports": [{ "containerPort": 8100 }],
                             "volumeMounts": [
                                 {
