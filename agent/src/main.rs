@@ -23,6 +23,7 @@ use tokio_rustls::TlsAcceptor;
 use udp_stream::UdpStream;
 
 static PMZ_PROTO_HDR: &str = "Pmz-Proto";
+static PROTO_UDP: &str = "UDP";
 
 enum PROTO {
     TCP,
@@ -31,7 +32,7 @@ enum PROTO {
 
 impl PROTO {
     pub fn from(s: &str) -> Self {
-        if s.eq_ignore_ascii_case("UDP") {
+        if s.eq(PROTO_UDP) {
             return PROTO::UDP;
         }
 
