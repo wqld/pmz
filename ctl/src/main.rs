@@ -20,10 +20,17 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Run(RunArgs),
     Agent(AgentArgs),
     Connect,
     Disconnect,
     Dns(DnsArgs),
+}
+
+#[derive(Debug, Args, Serialize)]
+struct RunArgs {
+    #[arg(short, long, default_value = "eth0")]
+    interface: String,
 }
 
 #[derive(Debug, Args)]
@@ -80,6 +87,10 @@ async fn main() -> Result<()> {
     let args = Cli::parse();
 
     match args.command {
+        Commands::Run(args) => {
+            debug!("pmzctl run with {args:?}");
+            run_daemon(&args).await?;
+        }
         Commands::Agent(agent) => match agent.command {
             AgentCommands::Deploy(args) => {
                 debug!("pmzctl agent deploy");
@@ -116,6 +127,19 @@ async fn main() -> Result<()> {
             }
         },
     };
+
+    Ok(())
+}
+
+async fn run_daemon(args: &RunArgs) -> Result<()> {
+    let mut daemon = tokio::process::Command::new("./pmz")
+        .args(&["--iface", &args.interface])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()?;
+
+    println!("Running..");
+    let _ = daemon.wait().await;
 
     Ok(())
 }

@@ -158,16 +158,17 @@ A different method will be used for future releases:
 
 - `tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'`
 
-Next, let's start the `pmz` daemon.
+### Usage
+
+First, let's start the `pmz-daemon`.
 Since `pmz` uses eBPF, you need to specify your local machine's network interface so it knows where to load the eBPF program:
 
 ```sh
-./pmz --iface eth0
+> pmzctl run --interface eth0
+Running..
 ```
 
-### Usage
-
-First, deploy the `pmz-agent` to your Kubernetes cluster:
+Next, open a new shell and deploy the `pmz-agent` to your Kubernetes cluster:
 
 ```sh
 > pmzctl agent deploy
