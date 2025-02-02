@@ -4,7 +4,10 @@ use core::{
     ptr,
 };
 
-use aya_ebpf::programs::TcContext;
+use aya_ebpf::{
+    bindings::{__sk_buff, xdp_md},
+    EbpfContext,
+};
 use common::DnsHdr;
 use network_types::{
     eth::{EthHdr, EtherType},
@@ -12,6 +15,11 @@ use network_types::{
     tcp::TcpHdr,
     udp::UdpHdr,
 };
+
+pub enum Kind {
+    TC,
+    XDP,
+}
 
 #[derive(PartialEq, Eq)]
 pub enum Protocol {
@@ -34,8 +42,9 @@ impl Protocol {
     }
 }
 
-pub struct Context<'a> {
-    pub ctx: &'a mut TcContext,
+pub struct Context<'a, C: EbpfContext> {
+    pub ctx: &'a mut C,
+    pub kind: Kind,
     pub proto: Option<Protocol>,
     pub eth_hdr: *mut EthHdr,
     pub ip_hdr: *mut Ipv4Hdr,
@@ -44,24 +53,28 @@ pub struct Context<'a> {
     pub dns_hdr: *mut DnsHdr,
 }
 
-impl Deref for Context<'_> {
-    type Target = TcContext;
+impl<C: EbpfContext> Deref for Context<'_, C> {
+    type Target = C;
 
     fn deref(&self) -> &Self::Target {
         self.ctx
     }
 }
 
-impl DerefMut for Context<'_> {
+impl<C: EbpfContext> DerefMut for Context<'_, C> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.ctx
     }
 }
 
-impl<'a> Context<'a> {
-    fn new(ctx: &'a mut TcContext) -> Self {
+impl<'a, C> Context<'a, C>
+where
+    C: EbpfContext,
+{
+    fn new(ctx: &'a mut C, kind: Kind) -> Self {
         Self {
             ctx,
+            kind,
             proto: None,
             eth_hdr: ptr::null_mut(),
             ip_hdr: ptr::null_mut(),
@@ -71,8 +84,8 @@ impl<'a> Context<'a> {
         }
     }
 
-    pub fn load(ctx: &'a mut TcContext) -> Result<Self, ()> {
-        let mut ctx = Self::new(ctx);
+    pub fn load(ctx: &'a mut C, kind: Kind) -> Result<Self, ()> {
+        let mut ctx = Self::new(ctx, kind);
 
         ctx.eth_hdr = ctx.ptr_at_mut(0)?;
 
@@ -157,5 +170,26 @@ impl<'a> Context<'a> {
         }
 
         Ok((start + offset) as *mut T)
+    }
+
+    fn len(&self) -> u32 {
+        match self.kind {
+            Kind::TC => unsafe { (&*(self.as_ptr() as *const __sk_buff)).len },
+            Kind::XDP => 0,
+        }
+    }
+
+    fn data(&self) -> usize {
+        match self.kind {
+            Kind::TC => unsafe { (&*(self.as_ptr() as *const __sk_buff)).data as usize },
+            Kind::XDP => unsafe { (&*(self.as_ptr() as *const xdp_md)).data as usize },
+        }
+    }
+
+    fn data_end(&self) -> usize {
+        match self.kind {
+            Kind::TC => unsafe { (&*(self.as_ptr() as *const __sk_buff)).data_end as usize },
+            Kind::XDP => unsafe { (&*(self.as_ptr() as *const xdp_md)).data_end as usize },
+        }
     }
 }

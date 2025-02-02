@@ -7,6 +7,7 @@ use core::{
 use aya_ebpf::{
     bindings::{__sk_buff, BPF_F_INGRESS, TC_ACT_PIPE, TC_ACT_REDIRECT},
     helpers::{bpf_redirect, bpf_skb_change_tail},
+    programs::TcContext,
     EbpfContext,
 };
 use aya_log_ebpf::{debug, error};
@@ -72,11 +73,11 @@ impl DnsAnswer {
 }
 
 pub struct DnsResolver<'a> {
-    ctx: &'a mut Context<'a>,
+    ctx: &'a mut Context<'a, TcContext>,
 }
 
 impl<'a> Deref for DnsResolver<'a> {
-    type Target = Context<'a>;
+    type Target = Context<'a, TcContext>;
 
     fn deref(&self) -> &Self::Target {
         self.ctx
@@ -90,7 +91,7 @@ impl<'a> DerefMut for DnsResolver<'a> {
 }
 
 impl<'a> DnsResolver<'a> {
-    pub fn new(ctx: &'a mut Context<'a>) -> Self {
+    pub fn new(ctx: &'a mut Context<'a, TcContext>) -> Self {
         Self { ctx }
     }
 

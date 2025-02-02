@@ -6,6 +6,7 @@ use core::{
 use aya_ebpf::{
     bindings::{BPF_F_PSEUDO_HDR, TC_ACT_PIPE},
     helpers::bpf_csum_diff,
+    programs::TcContext,
 };
 use aya_log_ebpf::debug;
 use common::{NatKey, NatOrigin};
@@ -18,11 +19,11 @@ use crate::{
 };
 
 pub struct TrafficForwarder<'a> {
-    ctx: &'a mut Context<'a>,
+    ctx: &'a mut Context<'a, TcContext>,
 }
 
 impl<'a> Deref for TrafficForwarder<'a> {
-    type Target = Context<'a>;
+    type Target = Context<'a, TcContext>;
 
     fn deref(&self) -> &Self::Target {
         self.ctx
@@ -36,7 +37,7 @@ impl<'a> DerefMut for TrafficForwarder<'a> {
 }
 
 impl<'a> TrafficForwarder<'a> {
-    pub fn new(ctx: &'a mut Context<'a>) -> Self {
+    pub fn new(ctx: &'a mut Context<'a, TcContext>) -> Self {
         Self { ctx }
     }
 
