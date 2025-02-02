@@ -13,7 +13,7 @@ use memoffset::offset_of;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 use crate::{
-    context::{Context, Kind},
+    context::{Context, Protocol},
     NAT_TABLE, SERVICE_CIDR_MAP,
 };
 
@@ -43,9 +43,9 @@ impl<'a> TrafficForwarder<'a> {
     pub fn handle_ingress(&mut self) -> Result<i32, &'static str> {
         let subnet_mask: u32 = 4294901760; // u32::MAX << (32 - 16)
         let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
-        let (kind, proxy_port) = match self.kind {
-            Some(Kind::TCP) => (Kind::TCP, 38983 /* 18328 */),
-            Some(Kind::UDP) => (Kind::UDP, 38727 /* 18327 */),
+        let (kind, proxy_port) = match self.proto {
+            Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
+            Some(Protocol::UDP) => (Protocol::UDP, 38727 /* 18327 */),
             _ => return Ok(TC_ACT_PIPE),
         };
 
@@ -57,8 +57,8 @@ impl<'a> TrafficForwarder<'a> {
         unsafe {
             let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
             let (src_port, dst_port) = match kind {
-                Kind::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
-                Kind::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                Protocol::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
+                Protocol::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
@@ -78,16 +78,16 @@ impl<'a> TrafficForwarder<'a> {
     pub fn handle_egress(&mut self) -> Result<i32, &'static str> {
         unsafe {
             let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
-            let (kind, proxy_port) = match self.kind {
-                Some(Kind::TCP) => (Kind::TCP, 38983 /* 18328 */),
-                Some(Kind::UDP) => (Kind::UDP, 38727 /* 18327 */),
+            let (kind, proxy_port) = match self.proto {
+                Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
+                Some(Protocol::UDP) => (Protocol::UDP, 38727 /* 18327 */),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
             let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
             let (src_port, dst_port) = match kind {
-                Kind::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
-                Kind::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                Protocol::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
+                Protocol::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
@@ -102,7 +102,7 @@ impl<'a> TrafficForwarder<'a> {
     #[inline(always)]
     unsafe fn dnat(
         &mut self,
-        kind: Kind,
+        kind: Protocol,
         src_addr: u32,
         src_port: u16,
         dst_addr: u32,
@@ -123,8 +123,8 @@ impl<'a> TrafficForwarder<'a> {
         );
 
         let (port_offset, csum_offset) = match kind {
-            Kind::TCP => (offset_of!(TcpHdr, dest), offset_of!(TcpHdr, check)),
-            Kind::UDP => (offset_of!(UdpHdr, dest), offset_of!(UdpHdr, check)),
+            Protocol::TCP => (offset_of!(TcpHdr, dest), offset_of!(TcpHdr, check)),
+            Protocol::UDP => (offset_of!(UdpHdr, dest), offset_of!(UdpHdr, check)),
             _ => return Ok(TC_ACT_PIPE),
         };
 
@@ -177,7 +177,7 @@ impl<'a> TrafficForwarder<'a> {
     #[inline(always)]
     unsafe fn snat(
         &mut self,
-        kind: Kind,
+        kind: Protocol,
         src_addr: u32,
         src_port: u16,
         dst_addr: u32,
@@ -208,8 +208,8 @@ impl<'a> TrafficForwarder<'a> {
         );
 
         let (port_offset, csum_offset) = match kind {
-            Kind::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
-            Kind::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
+            Protocol::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
+            Protocol::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
             _ => return Ok(TC_ACT_PIPE),
         };
 

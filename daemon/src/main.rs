@@ -64,9 +64,9 @@ async fn main() -> anyhow::Result<()> {
     let _ = tc::qdisc_add_clsact(&iface);
     let _ = tc::qdisc_add_clsact("lo");
 
-    let tc_egress: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
-    tc_egress.load()?;
-    tc_egress.attach(&iface, TcAttachType::Egress)?;
+    let resolver: &mut SchedClassifier = ebpf.program_mut("resolver").unwrap().try_into()?;
+    resolver.load()?;
+    resolver.attach(&iface, TcAttachType::Egress)?;
 
     let ingress_forwarder: &mut SchedClassifier =
         ebpf.program_mut("ingress_forwarder").unwrap().try_into()?;

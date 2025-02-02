@@ -6,15 +6,20 @@ mod forwarder;
 mod resolver;
 
 use aya_ebpf::{
-    bindings::TC_ACT_PIPE,
-    macros::{classifier, map},
+    bindings::{
+        xdp_action::{self, XDP_ABORTED},
+        TC_ACT_PIPE,
+    },
+    macros::{classifier, map, xdp},
     maps::{HashMap, LruHashMap},
-    programs::TcContext,
+    programs::{TcContext, XdpContext},
 };
-use aya_log_ebpf::error;
+use aya_log_ebpf::{error, info};
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
-use context::{Context, Kind};
+use context::{Context, Protocol};
 use forwarder::TrafficForwarder;
+use network_types::eth::EthHdr;
+use pmz_ebpf::ptr_at_mut;
 use resolver::DnsResolver;
 
 #[map]
@@ -43,8 +48,8 @@ fn try_resolve_dns(ctx: &mut TcContext) -> Result<i32, &'static str> {
         _ => return Ok(TC_ACT_PIPE),
     };
 
-    match ctx.kind {
-        Some(Kind::DNS) => {
+    match ctx.proto {
+        Some(Protocol::DNS) => {
             let mut dns_resolver = DnsResolver::new(&mut ctx);
             dns_resolver.handle()
         }
@@ -92,6 +97,30 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
 
     let mut forwarder = TrafficForwarder::new(&mut ctx);
     forwarder.handle_egress()
+}
+
+#[xdp]
+pub fn interceptor(ctx: XdpContext) -> u32 {
+    match unsafe { try_interceptor(ctx) } {
+        Ok(ret) => ret,
+        Err(_) => XDP_ABORTED,
+    }
+}
+
+unsafe fn try_interceptor(ctx: XdpContext) -> Result<u32, ()> {
+    info!(&ctx, "received a packet");
+
+    // let start = ctx.data();
+    // let end = ctx.data_end();
+
+    // let eth_hdr: *mut EthHdr = ptr_at_mut(start, end, 0)?;
+
+    // match unsafe { (*eth_hdr).ether_type } {
+    //     network_types::eth::EtherType::Ipv4 => {}
+    //     _ => return Err(()),
+    // }
+
+    Ok(xdp_action::XDP_PASS)
 }
 
 #[cfg(not(test))]

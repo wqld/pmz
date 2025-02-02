@@ -91,10 +91,15 @@ impl<'a> Deploy<'a> {
                         }
                     },
                     "spec": {
+                        "hostNetwork": true,
                         "containers": [{
                             "name": AGENT_APP_NAME,
                             "image": "ghcr.io/wqld/pmz-agent:0.1.0",
                             "ports": [{ "containerPort": 8100 }],
+                            // "env": [{
+                            //     "name": "RUST_LOG",
+                            //     "value": "debug"
+                            // }],
                             "volumeMounts": [
                                 {
                                     "name": TLS_SECRET_NAME,
@@ -108,7 +113,10 @@ impl<'a> Deploy<'a> {
                                     "mountPath": "/certs/pmz.key",
                                     "subPath": "tls.key"
                                 }
-                            ]
+                            ],
+                            "securityContext": {
+                                "privileged": true
+                            }
                         }],
                         "volumes": [{
                             "name": TLS_SECRET_NAME,

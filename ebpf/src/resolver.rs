@@ -144,7 +144,8 @@ impl<'a> DnsResolver<'a> {
                 self.store(answer_start, &extra_dns_buf, 0)
                     .map_err(|_| "failed to store dns_response")?;
 
-                self.update_hdrs().map_err(|_| "failed to update headers")?;
+                self.update_hdrs_for_dns()
+                    .map_err(|_| "failed to update headers for dns")?;
 
                 unsafe {
                     self.swap_src_dst();

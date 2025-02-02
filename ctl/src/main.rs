@@ -25,6 +25,7 @@ enum Commands {
     Connect,
     Disconnect,
     Dns(DnsArgs),
+    Intercept,
 }
 
 #[derive(Debug, Args, Serialize)]
@@ -126,6 +127,10 @@ async fn main() -> Result<()> {
                 send_request_to_daemon(Method::GET, "/dns", None).await?;
             }
         },
+        Commands::Intercept => {
+            debug!("pmzctl intercept");
+            send_request_to_daemon(Method::POST, "/intercept", None).await?;
+        }
     };
 
     Ok(())
