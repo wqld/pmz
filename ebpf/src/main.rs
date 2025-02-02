@@ -7,7 +7,7 @@ mod resolver;
 
 use aya_ebpf::{
     bindings::{
-        xdp_action::{self, XDP_ABORTED},
+        xdp_action::{self, XDP_ABORTED, XDP_PASS},
         TC_ACT_PIPE,
     },
     macros::{classifier, map, xdp},
@@ -16,7 +16,7 @@ use aya_ebpf::{
 };
 use aya_log_ebpf::{error, info};
 use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
-use context::{Context, Protocol};
+use context::{Context, Kind, Protocol};
 use forwarder::TrafficForwarder;
 use network_types::eth::EthHdr;
 use pmz_ebpf::ptr_at_mut;
@@ -43,7 +43,7 @@ pub fn resolver(mut ctx: TcContext) -> i32 {
 }
 
 fn try_resolve_dns(ctx: &mut TcContext) -> Result<i32, &'static str> {
-    let mut ctx = match Context::load(ctx) {
+    let mut ctx = match Context::load(ctx, Kind::TC) {
         Ok(ctx) => ctx,
         _ => return Ok(TC_ACT_PIPE),
     };
@@ -69,7 +69,7 @@ pub fn ingress_forwarder(mut ctx: TcContext) -> i32 {
 }
 
 fn try_forward_ingress(ctx: &mut TcContext) -> Result<i32, &'static str> {
-    let mut ctx = match Context::load(ctx) {
+    let mut ctx = match Context::load(ctx, Kind::TC) {
         Ok(ctx) => ctx,
         _ => return Ok(TC_ACT_PIPE),
     };
@@ -90,7 +90,7 @@ pub fn egress_forwarder(mut ctx: TcContext) -> i32 {
 }
 
 fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
-    let mut ctx = match Context::load(ctx) {
+    let mut ctx = match Context::load(ctx, Kind::TC) {
         Ok(ctx) => ctx,
         _ => return Ok(TC_ACT_PIPE),
     };
@@ -100,25 +100,20 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
 }
 
 #[xdp]
-pub fn interceptor(ctx: XdpContext) -> u32 {
-    match unsafe { try_interceptor(ctx) } {
+pub fn interceptor(mut ctx: XdpContext) -> u32 {
+    match unsafe { try_interceptor(&mut ctx) } {
         Ok(ret) => ret,
         Err(_) => XDP_ABORTED,
     }
 }
 
-unsafe fn try_interceptor(ctx: XdpContext) -> Result<u32, ()> {
-    info!(&ctx, "received a packet");
+unsafe fn try_interceptor(ctx: &mut XdpContext) -> Result<u32, ()> {
+    info!(ctx, "received a packet");
 
-    // let start = ctx.data();
-    // let end = ctx.data_end();
-
-    // let eth_hdr: *mut EthHdr = ptr_at_mut(start, end, 0)?;
-
-    // match unsafe { (*eth_hdr).ether_type } {
-    //     network_types::eth::EtherType::Ipv4 => {}
-    //     _ => return Err(()),
-    // }
+    let mut ctx = match Context::load(ctx, Kind::XDP) {
+        Ok(ctx) => ctx,
+        _ => return Ok(XDP_PASS),
+    };
 
     Ok(xdp_action::XDP_PASS)
 }
