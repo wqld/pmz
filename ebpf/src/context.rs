@@ -14,29 +14,29 @@ use network_types::{
 };
 
 #[derive(PartialEq, Eq)]
-pub enum Kind {
+pub enum Protocol {
     DNS,
     TCP,
     UDP,
 }
 
-static KIND_DNS: &str = "DNS";
-static KIND_TCP: &str = "TCP";
-static KIND_UDP: &str = "UDP";
+static PROTO_DNS: &str = "DNS";
+static PROTO_TCP: &str = "TCP";
+static PROTO_UDP: &str = "UDP";
 
-impl Kind {
+impl Protocol {
     pub fn kind(&self) -> &'static str {
         match self {
-            Kind::DNS => KIND_DNS,
-            Kind::TCP => KIND_TCP,
-            Kind::UDP => KIND_UDP,
+            Protocol::DNS => PROTO_DNS,
+            Protocol::TCP => PROTO_TCP,
+            Protocol::UDP => PROTO_UDP,
         }
     }
 }
 
 pub struct Context<'a> {
     pub ctx: &'a mut TcContext,
-    pub kind: Option<Kind>,
+    pub proto: Option<Protocol>,
     pub eth_hdr: *mut EthHdr,
     pub ip_hdr: *mut Ipv4Hdr,
     pub tcp_hdr: *mut TcpHdr,
@@ -62,7 +62,7 @@ impl<'a> Context<'a> {
     fn new(ctx: &'a mut TcContext) -> Self {
         Self {
             ctx,
-            kind: None,
+            proto: None,
             eth_hdr: ptr::null_mut(),
             ip_hdr: ptr::null_mut(),
             tcp_hdr: ptr::null_mut(),
@@ -86,16 +86,16 @@ impl<'a> Context<'a> {
         match unsafe { (*ctx.ip_hdr).proto } {
             IpProto::Udp => {
                 ctx.udp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
-                ctx.kind = match (unsafe { *ctx.udp_hdr }).dest {
+                ctx.proto = match (unsafe { *ctx.udp_hdr }).dest {
                     13568 /* 53 */ => {
                         ctx.dns_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
-                        Some(Kind::DNS)
+                        Some(Protocol::DNS)
                     }
-                    _ => Some(Kind::UDP),
+                    _ => Some(Protocol::UDP),
                 };
             }
             IpProto::Tcp => {
-                ctx.kind = Some(Kind::TCP);
+                ctx.proto = Some(Protocol::TCP);
                 ctx.tcp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
             }
             _ => return Err(()),
@@ -104,20 +104,11 @@ impl<'a> Context<'a> {
         Ok(ctx)
     }
 
-    pub fn update_hdrs(&mut self) -> Result<(), ()> {
+    pub fn update_hdrs_for_dns(&mut self) -> Result<(), ()> {
         self.eth_hdr = self.ptr_at_mut(0)?;
         self.ip_hdr = self.ptr_at_mut(EthHdr::LEN)?;
         self.udp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
         self.dns_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
-
-        // match unsafe { (*self.ip_hdr).proto } {
-        //     IpProto::Udp => {
-        //         self.udp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
-        //         self.dns_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
-        //     }
-        //     IpProto::Tcp => self.tcp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?,
-        //     _ => {}
-        // };
 
         Ok(())
     }

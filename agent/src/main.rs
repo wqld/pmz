@@ -3,18 +3,19 @@ use std::sync::Arc;
 use std::{fs, io};
 
 use anyhow::Result;
+use aya::programs::{Xdp, XdpFlags};
 use bytes::Bytes;
 use clap::Parser;
+use http::StatusCode;
 use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
 use hyper::body::Incoming;
-use hyper::client::conn::http1;
 use hyper::server::conn::http2;
 use hyper::service::service_fn;
 use hyper::upgrade::Upgraded;
 use hyper::{Method, Request, Response};
 
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use rustls::ServerConfig;
 use tokio::io::AsyncWriteExt;
@@ -43,11 +44,14 @@ impl PROTO {
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Args {
+    #[clap(short, long, default_value = "eth0")]
+    iface: String,
+
     #[arg(short, long, default_value = "127.0.0.1")]
     ip: String,
 
     #[arg(short, long, default_value_t = 8100)]
-    port: u16,
+    proxy_port: u16,
 
     #[arg(short, long, default_value_t = 8101)]
     health_check_port: u16,
@@ -65,10 +69,31 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let addr = SocketAddr::from((args.ip.parse::<std::net::IpAddr>()?, args.port));
+    let rlim = libc::rlimit {
+        rlim_cur: libc::RLIM_INFINITY,
+        rlim_max: libc::RLIM_INFINITY,
+    };
+    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
+    if ret != 0 {
+        debug!("remove limit on locked memory failed, ret is: {}", ret);
+    }
 
-    let listener = TcpListener::bind(addr).await?;
-    let tls_acceptor = create_tls_acceptor(&args.cert, &args.key)?;
+    let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
+        env!("OUT_DIR"),
+        "/pmz"
+    )))?;
+    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+        warn!("failed to initialize eBPF logger: {}", e);
+    }
+
+    let interceptor: &mut Xdp = ebpf.program_mut("interceptor").unwrap().try_into()?;
+    interceptor.load()?;
+    interceptor.attach(&args.iface, XdpFlags::default())?;
+
+    let addr = SocketAddr::from((args.ip.parse::<std::net::IpAddr>()?, args.proxy_port));
+
+    let proxy_listener = TcpListener::bind(addr).await?;
+    let proxy_tls_acceptor = create_tls_acceptor(&args.cert, &args.key)?;
     info!("Listening on {} w/ tls", addr);
 
     let health_check_addr = SocketAddr::from(([0, 0, 0, 0], args.health_check_port));
@@ -86,8 +111,8 @@ async fn main() -> Result<()> {
     });
 
     loop {
-        let (tcp_stream, _) = listener.accept().await?;
-        let tls_acceptor = tls_acceptor.clone();
+        let (tcp_stream, _) = proxy_listener.accept().await?;
+        let tls_acceptor = proxy_tls_acceptor.clone();
 
         tokio::task::spawn(async move {
             let tls_stream = match tls_acceptor.accept(tcp_stream).await {
@@ -164,25 +189,10 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes
 async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     debug!("handle_http: {:?}", req);
 
-    let host = req.uri().host().expect("uri has no host");
-    let port = req.uri().port_u16().unwrap_or(80);
-
-    let stream = TcpStream::connect((host, port)).await.unwrap();
-
-    let (mut sender, conn) = http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(TokioIo::new(stream))
-        .await?;
-
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            error!("Connection failed: {:?}", err);
-        }
-    });
-
-    let resp = sender.send_request(req).await?;
-    Ok(resp.map(|b| b.boxed()))
+    match (req.method(), req.uri().path()) {
+        (&Method::POST, "/intercept") => start_intercept().await,
+        _ => not_found().await,
+    }
 }
 
 async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()> {
@@ -240,4 +250,14 @@ fn load_key(filename: &str) -> io::Result<PrivateKeyDer<'static>> {
 
 fn error(err: String) -> io::Error {
     io::Error::new(io::ErrorKind::Other, err)
+}
+
+async fn start_intercept() -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    Ok(Response::new(full("intercept started")))
+}
+
+async fn not_found() -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    Ok(Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(full("Not found"))?)
 }

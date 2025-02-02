@@ -38,7 +38,7 @@ use crate::{
     discovery::Discovery,
     forward::Forward,
     route::Route,
-    tunnel::{Tunnel, TunnelRequest},
+    tunnel::{establish_http2_connection, Tunnel, TunnelRequest},
 };
 
 pub struct Command {
@@ -114,6 +114,8 @@ async fn handle_request(
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
+    let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
+
     match (req.method(), req.uri().path()) {
         (&Method::POST, "/agent") => deploy_agent(req.into_body()).await,
         (&Method::DELETE, "/agent") => delete_agent().await,
@@ -123,6 +125,7 @@ async fn handle_request(
                 service_registry,
                 service_cidr_map,
                 connection_manager,
+                tunnel_port,
             )
             .await
         }
@@ -134,6 +137,7 @@ async fn handle_request(
             remove_dns(req.into_body(), service_registry, connection_manager).await
         }
         (&Method::GET, "/dns") => list_dns(service_registry, connection_manager).await,
+        (&Method::POST, "/intercept") => start_intercept(tunnel_port).await,
         _ => not_found().await,
     }
 }
@@ -145,7 +149,7 @@ async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
         Ok(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::<Bytes>::from("pmz-agent is already deployed"))?)
+                .body(Full::from("pmz-agent is already deployed"))?)
         }
         Err(_) => {}
     };
@@ -159,7 +163,7 @@ async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
     deploy.deploy_tls_secret().await?;
     deploy.deploy_agent().await?;
 
-    Ok(Response::new(Full::<Bytes>::from("Agent deployed")))
+    Ok(Response::new(Full::from("Agent deployed")))
 }
 
 async fn delete_agent() -> Result<Response<Full<Bytes>>> {
@@ -171,14 +175,14 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
             Err(_) => {
                 return Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Full::<Bytes>::from("pmz-agent not found"))?)
+                    .body(Full::from("pmz-agent not found"))?)
             }
         };
 
     let deploy = Deploy::new(client, &agent_namespace);
     deploy.clean_resources().await?;
 
-    Ok(Response::new(Full::<Bytes>::from("Agent deleted")))
+    Ok(Response::new(Full::from("Agent deleted")))
 }
 
 async fn connect(
@@ -186,14 +190,13 @@ async fn connect(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
+    tunnel_port: u16,
 ) -> Result<Response<Full<Bytes>>> {
     let agent_port = 8100; // TODO
-    let tunnel_host = "localhost";
-    let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
 
     let mut connection_manager = connection_manager.lock().await;
     if connection_manager.check_connection("default") {
-        return Ok(Response::new(Full::<Bytes>::from("Already connected")));
+        return Ok(Response::new(Full::from("Already connected")));
     }
 
     let client = loop {
@@ -215,7 +218,7 @@ async fn connect(
             Err(_) => {
                 return Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Full::<Bytes>::from("pmz-agent not found"))?)
+                    .body(Full::from("pmz-agent not found"))?)
             }
         };
 
@@ -235,16 +238,14 @@ async fn connect(
             let mut cert_file = File::create(cert_path)?;
             cert_file.write_all(&crt.0)?;
         } else {
-            return Ok(Response::builder().status(StatusCode::NOT_FOUND).body(
-                Full::<Bytes>::from("pmz-tls secret doesn't have a tls.crt field."),
-            )?);
+            return Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Full::from("pmz-tls secret doesn't have a tls.crt field."))?);
         }
     } else {
         return Ok(Response::builder()
             .status(StatusCode::NOT_FOUND)
-            .body(Full::<Bytes>::from(
-                "pmz-tls secret doesn't have a data attribute.",
-            ))?);
+            .body(Full::from("pmz-tls secret doesn't have a data attribute."))?);
     }
 
     let pods: Api<Pod> = Api::namespaced(client.clone(), &agent_namespace);
@@ -259,7 +260,7 @@ async fn connect(
     let route = Route::setup_routes(service_cidr_map).await?;
     let discovery = Discovery::new(service_registry);
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
-    let tunnel = Tunnel::new(&tunnel_host, tunnel_port, req_rx);
+    let tunnel = Tunnel::new(tunnel_port, req_rx);
 
     tokio::spawn(async move { discovery.watch(client, shutdown_discovery).await });
     tokio::spawn(async move { forward.start(shutdown_forward).await });
@@ -274,8 +275,8 @@ async fn connect(
         .connections
         .insert("default".to_string(), connection)
     {
-        Some(_) => Ok(Response::new(Full::<Bytes>::from("Connected what?!"))),
-        None => Ok(Response::new(Full::<Bytes>::from("Connected"))),
+        Some(_) => Ok(Response::new(Full::from("Connected what?!"))),
+        None => Ok(Response::new(Full::from("Connected"))),
     }
 }
 
@@ -290,9 +291,9 @@ async fn disconnect(
     match connection {
         Some(conn) => {
             conn.shutdown_tx.send(())?;
-            Ok(Response::new(Full::<Bytes>::from("Disconnected")))
+            Ok(Response::new(Full::from("Disconnected")))
         }
-        None => Ok(Response::new(Full::<Bytes>::from("No connection"))),
+        None => Ok(Response::new(Full::from("No connection"))),
     }
 }
 
@@ -303,11 +304,11 @@ async fn add_dns(
 ) -> Result<Response<Full<Bytes>>> {
     let connection_manager = connection_manager.lock().await;
     if !connection_manager.check_connection("default") {
-        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-            Full::<Bytes>::from(
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::from(
                 "Not connected. Please run 'pmzctl connect' to establish a connection.",
-            ),
-        )?);
+            ))?);
     }
 
     let body = req.collect().await?.aggregate();
@@ -322,7 +323,7 @@ async fn add_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::<Bytes>::from("Please provide the domain name."))?)
+                .body(Full::from("Please provide the domain name."))?)
         }
     };
 
@@ -342,7 +343,7 @@ async fn add_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::<Bytes>::from("Please provide the service name."))?)
+                .body(Full::from("Please provide the service name."))?)
         }
     };
 
@@ -350,9 +351,9 @@ async fn add_dns(
     let service = match services.get(&service_name).await {
         Ok(service) => service,
         Err(_) => {
-            return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-                Full::<Bytes>::from(format!("Service {service_name:?} not founds")),
-            )?)
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(format!("Service {service_name:?} not founds")))?)
         }
     };
 
@@ -360,17 +361,19 @@ async fn add_dns(
         Some(spec) => match spec.cluster_ip {
             Some(ip) => ip,
             None => {
-                return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-                    Full::<Bytes>::from(format!(
+                return Ok(Response::builder()
+                    .status(StatusCode::BAD_REQUEST)
+                    .body(Full::from(format!(
                         "Service {service_name:?} doesn't have the cluster ip"
-                    )),
-                )?)
+                    )))?)
             }
         },
         None => {
-            return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-                Full::<Bytes>::from(format!("Service {service_name:?} doesn't have the spec")),
-            )?)
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(format!(
+                    "Service {service_name:?} doesn't have the spec"
+                )))?)
         }
     };
 
@@ -383,7 +386,7 @@ async fn add_dns(
 
     registry.insert(dns_query, dns_recard_a, 0)?;
 
-    Ok(Response::new(Full::<Bytes>::from("dns added")))
+    Ok(Response::new(Full::from("dns added")))
 }
 
 async fn remove_dns(
@@ -393,11 +396,11 @@ async fn remove_dns(
 ) -> Result<Response<Full<Bytes>>> {
     let connection_manager = connection_manager.lock().await;
     if !connection_manager.check_connection("default") {
-        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-            Full::<Bytes>::from(
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::from(
                 "Not connected. Please run 'pmzctl connect' to establish a connection.",
-            ),
-        )?);
+            ))?);
     }
 
     let body = req.collect().await?.aggregate();
@@ -412,7 +415,7 @@ async fn remove_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::<Bytes>::from("Please provide the domain name."))?)
+                .body(Full::from("Please provide the domain name."))?)
         }
     };
 
@@ -426,7 +429,7 @@ async fn remove_dns(
 
     registry.remove(&dns_query)?;
 
-    Ok(Response::new(Full::<Bytes>::from("dns removed")))
+    Ok(Response::new(Full::from("dns removed")))
 }
 
 async fn list_dns(
@@ -454,11 +457,34 @@ async fn list_dns(
         })
         .collect();
 
-    Ok(Response::new(Full::<Bytes>::from(services)))
+    Ok(Response::new(Full::from(services)))
+}
+
+async fn start_intercept(tunnel_port: u16) -> Result<Response<Full<Bytes>>> {
+    let sender = establish_http2_connection("localhost", tunnel_port).await?;
+    let mut send_req = sender.ready().await.unwrap();
+
+    debug!("ok get h2 sender");
+
+    let req = http::Request::builder()
+        .uri("/")
+        .method(http::Method::GET)
+        .body(())?;
+
+    let (resp, _) = send_req.send_request(req, true)?;
+    let resp = resp.await?;
+    let (parts, mut body) = resp.into_parts();
+    let body = body.data().await.unwrap()?;
+    debug!("{:?}: {:?}", parts.status, body);
+
+    Ok(Response::builder()
+        .status(parts.status)
+        .body(Full::from(body))
+        .unwrap())
 }
 
 async fn not_found() -> Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
-        .body(Full::<Bytes>::from("Not found"))?)
+        .body(Full::from("Not found"))?)
 }

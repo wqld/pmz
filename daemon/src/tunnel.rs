@@ -29,46 +29,20 @@ use tokio_rustls::TlsConnector;
 static PMZ_PROTO_HDR: &str = "Pmz-Proto";
 
 pub struct Tunnel {
-    tunnel_host: String,
     tunnel_port: u16,
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
 }
 
 impl Tunnel {
-    pub fn new(
-        tunnel_host: &str,
-        tunnel_port: u16,
-        req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
-    ) -> Self {
+    pub fn new(tunnel_port: u16, req_rx: Arc<Mutex<Receiver<TunnelRequest>>>) -> Self {
         Self {
-            tunnel_host: tunnel_host.to_owned(),
             tunnel_port,
             req_rx,
         }
     }
 
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
-        let tunnel_addr = format!("{}:{}", self.tunnel_host, self.tunnel_port);
-        let stream = TcpStream::connect(tunnel_addr).await.unwrap();
-
-        let mut client_config = ClientConfig::builder()
-            .dangerous()
-            .with_custom_certificate_verifier(PmzCertVerifier::new())
-            .with_no_client_auth();
-        client_config.alpn_protocols = vec![b"h2".to_vec()];
-        let tls_connector = TlsConnector::from(Arc::new(client_config));
-
-        let tls_stream = tls_connector
-            .connect(
-                ServerName::try_from(self.tunnel_host.clone()).unwrap(),
-                stream,
-            )
-            .await
-            .unwrap();
-
-        let (sender, conn) = h2::client::handshake(tls_stream).await.unwrap();
-        tokio::spawn(conn);
-
+        let sender = establish_http2_connection("localhost", self.tunnel_port).await?;
         let send_req = sender.ready().await.unwrap();
 
         loop {
@@ -94,7 +68,7 @@ impl Tunnel {
         send_req: SendRequest<Bytes>,
         mut tunnel_req: TunnelRequest,
     ) {
-        let send_req = send_req.clone();
+        let mut send_req = send_req.clone();
 
         tokio::spawn(async move {
             let target = tunnel_req.target;
@@ -107,7 +81,9 @@ impl Tunnel {
                 .body(())
                 .unwrap();
 
-            let mut send_req = send_req.ready().await.unwrap();
+            futures::future::poll_fn(|cx| send_req.poll_ready(cx))
+                .await
+                .unwrap();
             let (resp, send) = send_req.send_request(req, false).unwrap();
             let recv = resp.await.unwrap().into_body();
 
@@ -128,7 +104,7 @@ impl Tunnel {
     }
 
     async fn heartbeat(&self, send_req: SendRequest<Bytes>) {
-        let send_req = send_req.clone();
+        let mut send_req = send_req.clone();
 
         tokio::spawn(async move {
             let req = http::Request::builder()
@@ -138,13 +114,36 @@ impl Tunnel {
                 .body(())
                 .unwrap();
 
-            let mut send_req = send_req.ready().await.unwrap();
+            futures::future::poll_fn(|cx| send_req.poll_ready(cx))
+                .await
+                .unwrap();
             let (resp, _) = send_req.send_request(req, true).unwrap();
             let resp = resp.await.unwrap();
 
             debug!("heartbeat: {}", resp.status());
         });
     }
+}
+
+pub async fn establish_http2_connection(host: &str, port: u16) -> Result<SendRequest<Bytes>> {
+    let tunnel_addr = format!("{}:{}", host, port);
+    let stream = TcpStream::connect(tunnel_addr).await?;
+
+    let mut client_config = ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(PmzCertVerifier::new())
+        .with_no_client_auth();
+    client_config.alpn_protocols = vec![b"h2".to_vec()];
+    let tls_connector = TlsConnector::from(Arc::new(client_config));
+
+    let tls_stream = tls_connector
+        .connect(ServerName::try_from(host.to_owned())?, stream)
+        .await?;
+
+    let (sender, conn) = h2::client::handshake(tls_stream).await?;
+    tokio::spawn(conn);
+
+    Ok(sender)
 }
 
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
