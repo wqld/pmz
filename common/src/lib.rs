@@ -36,7 +36,7 @@ unsafe impl aya::Pod for DnsRecordA {}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct NatKey {
+pub struct SockPair {
     pub src_addr: u32,
     pub dst_addr: u32,
     pub src_port: u16,
@@ -44,15 +44,15 @@ pub struct NatKey {
 }
 
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for NatKey {}
+unsafe impl aya::Pod for SockPair {}
 
 #[repr(C)]
 #[derive(Copy, Clone)]
-pub struct NatOrigin {
+pub struct SockAddr {
     pub addr: u32,
     pub dummy: u16,
     pub port: u16,
 }
 
 #[cfg(feature = "user")]
-unsafe impl aya::Pod for NatOrigin {}
+unsafe impl aya::Pod for SockAddr {}

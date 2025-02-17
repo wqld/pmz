@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
-members = ["daemon", "common", "ebpf", "agent", "ctl"]
-default-members = ["daemon", "common", "ctl"]
+members = ["daemon", "common", "ebpf", "agent", "ctl", "proxy"]
+default-members = ["daemon", "common", "ctl", "proxy"]
 
 [workspace.dependencies]
 aya = { version = "0.13.1", default-features = false }

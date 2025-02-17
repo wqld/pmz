@@ -3,25 +3,23 @@ use std::sync::{Arc, RwLock};
 
 use anyhow::{bail, Result};
 use aya::maps::{HashMap, MapData};
-use common::{NatKey, NatOrigin};
+use common::{SockAddr, SockPair};
 use log::debug;
+use proxy::tunnel::{PROTO_TCP, PROTO_UDP};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::Sender;
 use udp_stream::UdpListener;
 
 use crate::TunnelRequest;
 
-static PROTO_TCP: &str = "TCP";
-static PROTO_UDP: &str = "UDP";
-
 pub struct Proxy {
-    nat_table: Arc<RwLock<HashMap<MapData, NatKey, NatOrigin>>>,
+    nat_table: Arc<RwLock<HashMap<MapData, SockPair, SockAddr>>>,
     req_tx: Sender<TunnelRequest>,
 }
 
 impl Proxy {
     pub fn new(
-        nat_table: HashMap<MapData, NatKey, NatOrigin>,
+        nat_table: HashMap<MapData, SockPair, SockAddr>,
         req_tx: Sender<TunnelRequest>,
     ) -> Self {
         Self {
@@ -94,7 +92,7 @@ impl Proxy {
             IpAddr::V6(_) => 0,
         };
 
-        let nat_key = NatKey {
+        let nat_key = SockPair {
             src_addr: u32::to_be(peer_ip),
             src_port: u16::to_be(peer_addr.port()),
             dst_addr: u32::to_be(2130706433),

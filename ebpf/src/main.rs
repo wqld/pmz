@@ -3,23 +3,23 @@
 
 mod context;
 mod forwarder;
+mod interceptor;
 mod resolver;
 
 use aya_ebpf::{
     bindings::{
-        xdp_action::{self, XDP_ABORTED, XDP_PASS},
+        xdp_action::{XDP_ABORTED, XDP_PASS},
         TC_ACT_PIPE,
     },
     macros::{classifier, map, xdp},
     maps::{HashMap, LruHashMap},
     programs::{TcContext, XdpContext},
 };
-use aya_log_ebpf::{error, info};
-use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
+use aya_log_ebpf::error;
+use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
 use context::{Context, Kind, Protocol};
 use forwarder::TrafficForwarder;
-use network_types::eth::EthHdr;
-use pmz_ebpf::ptr_at_mut;
+use interceptor::Interceptor;
 use resolver::DnsResolver;
 
 #[map]
@@ -29,7 +29,10 @@ static SERVICE_CIDR_MAP: HashMap<u8, u32> = HashMap::with_max_entries(1, 0);
 static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entries(65536, 0);
 
 #[map]
-static NAT_TABLE: LruHashMap<NatKey, NatOrigin> = LruHashMap::with_max_entries(65536, 0);
+static NAT_TABLE: LruHashMap<SockPair, SockAddr> = LruHashMap::with_max_entries(65536, 0);
+
+#[map]
+static INTERCEPT_RULE: HashMap<SockAddr, SockAddr> = HashMap::with_max_entries(256, 0);
 
 #[classifier]
 pub fn resolver(mut ctx: TcContext) -> i32 {
@@ -108,14 +111,15 @@ pub fn interceptor(mut ctx: XdpContext) -> u32 {
 }
 
 unsafe fn try_interceptor(ctx: &mut XdpContext) -> Result<u32, ()> {
-    info!(ctx, "received a packet");
+    // info!(ctx, "received a packet");
 
     let mut ctx = match Context::load(ctx, Kind::XDP) {
         Ok(ctx) => ctx,
         _ => return Ok(XDP_PASS),
     };
 
-    Ok(xdp_action::XDP_PASS)
+    let mut interceptor = Interceptor::new(&mut ctx);
+    interceptor.handle_xdp()
 }
 
 #[cfg(not(test))]

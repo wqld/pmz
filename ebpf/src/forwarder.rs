@@ -9,7 +9,7 @@ use aya_ebpf::{
     programs::TcContext,
 };
 use aya_log_ebpf::debug;
-use common::{NatKey, NatOrigin};
+use common::{SockAddr, SockPair};
 use memoffset::offset_of;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
@@ -79,21 +79,21 @@ impl<'a> TrafficForwarder<'a> {
     pub fn handle_egress(&mut self) -> Result<i32, &'static str> {
         unsafe {
             let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
-            let (kind, proxy_port) = match self.proto {
+            let (proto, proxy_port) = match self.proto {
                 Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
                 Some(Protocol::UDP) => (Protocol::UDP, 38727 /* 18327 */),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
             let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
-            let (src_port, dst_port) = match kind {
+            let (src_port, dst_port) = match proto {
                 Protocol::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
                 Protocol::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
             if src_addr == proxy_addr && src_port == proxy_port {
-                return self.snat(kind, src_addr, src_port, dst_addr, dst_port);
+                return self.snat(proto, src_addr, src_port, dst_addr, dst_port);
             }
         }
 
@@ -139,7 +139,7 @@ impl<'a> TrafficForwarder<'a> {
             csum_offset,
         )?;
 
-        let nat_key = NatKey {
+        let nat_key = SockPair {
             src_addr,
             dst_addr: proxy_addr,
             src_port,
@@ -151,7 +151,7 @@ impl<'a> TrafficForwarder<'a> {
             None => {}
         };
 
-        let nat_orign = NatOrigin {
+        let nat_orign = SockAddr {
             addr: dst_addr,
             dummy: 0,
             port: dst_port,
@@ -184,7 +184,7 @@ impl<'a> TrafficForwarder<'a> {
         dst_addr: u32,
         dst_port: u16,
     ) -> Result<i32, &'static str> {
-        let nat_key = NatKey {
+        let nat_key = SockPair {
             src_addr: dst_addr,
             src_port: dst_port,
             dst_addr: src_addr,

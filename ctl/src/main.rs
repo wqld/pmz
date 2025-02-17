@@ -25,7 +25,7 @@ enum Commands {
     Connect,
     Disconnect,
     Dns(DnsArgs),
-    Intercept,
+    Intercept(InterceptArgs),
 }
 
 #[derive(Debug, Args, Serialize)]
@@ -81,6 +81,29 @@ struct DnsRemoveArgs {
     domain: String,
 }
 
+#[derive(Debug, Args)]
+struct InterceptArgs {
+    #[command(subcommand)]
+    command: InterceptCommands,
+}
+
+#[derive(Debug, Subcommand)]
+enum InterceptCommands {
+    Add(InterceptAddArgs),
+    Remove,
+    List,
+}
+
+#[derive(Debug, Args, Serialize)]
+struct InterceptAddArgs {
+    #[arg(short, long)]
+    service: String,
+    #[arg(short, long, default_value = "default")]
+    namespace: String,
+    #[arg(short, long)]
+    port: String,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -127,10 +150,15 @@ async fn main() -> Result<()> {
                 send_request_to_daemon(Method::GET, "/dns", None).await?;
             }
         },
-        Commands::Intercept => {
-            debug!("pmzctl intercept");
-            send_request_to_daemon(Method::POST, "/intercept", None).await?;
-        }
+        Commands::Intercept(intercept) => match intercept.command {
+            InterceptCommands::Add(args) => {
+                debug!("pmzctl intercept add");
+                let json = serde_json::to_string(&args)?;
+                send_request_to_daemon(Method::POST, "/intercept", Some(json)).await?;
+            }
+            InterceptCommands::Remove => todo!(),
+            InterceptCommands::List => todo!(),
+        },
     };
 
     Ok(())
@@ -161,8 +189,8 @@ async fn send_request_to_daemon(method: Method, uri: &str, body_opt: Option<Stri
     });
 
     let req_body = match body_opt {
-        Some(b) => Full::<Bytes>::new(Bytes::from(b)),
-        None => Full::<Bytes>::new(Bytes::default()),
+        Some(b) => Full::new(Bytes::from(b)),
+        None => Full::new(Bytes::default()),
     };
 
     let req = http::Request::builder()

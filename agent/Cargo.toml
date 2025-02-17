@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 common = { package = "pmz-common", path = "../common", features = ["user"] }
+proxy = { package = "proxy", path = "../proxy"}
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -19,6 +20,8 @@ clap = { workspace = true, features = ["derive"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 futures-util = { version = "0.3", default-features = false }
+serde_json = "1.0.133"
+serde = { version = "1.0.216", features = ["derive"] }
 http-body-util = "0.1"
 bytes = "1"
 http = "1"
