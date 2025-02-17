@@ -12,6 +12,7 @@ ws = ["kube/ws"]
 
 [dependencies]
 common = { package = "pmz-common", path = "../common", features = ["user"] }
+proxy = { package = "proxy", path = "../proxy"}
 
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
@@ -20,7 +21,6 @@ env_logger = { workspace = true }
 libc = { workspace = true }
 log = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
-
 clap = { workspace = true, features = ["derive"] }
 
 kube = { version = "0.98", features = ["runtime", "client", "derive"] }
@@ -32,16 +32,11 @@ hyper-util = { version = "0.1", features = ["full"] }
 serde_json = "1.0.133"
 serde = { version = "1.0.216", features = ["derive"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
-rsln = "0.0.5"
+rsln = "0.0.6"
 ipnet = "2.10.1"
 http = "1.2.0"
 rustls = "0.23.20"
-rustls-pemfile = "2.2.0"
-tokio-rustls = "0.26.1"
-hyper-rustls = "0.27.4"
-h2 = "0.4.7"
 rcgen = "0.13"
-httparse = "1.9.5"
 udp-stream = "0.0.12"
 
 [build-dependencies]

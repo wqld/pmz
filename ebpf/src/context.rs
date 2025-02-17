@@ -160,6 +160,7 @@ where
         !((checksum & 0xffff) + (checksum >> 16)) as u16
     }
 
+    #[inline(always)]
     pub fn ptr_at_mut<T>(&self, offset: usize) -> Result<*mut T, ()> {
         let start = self.data();
         let end = self.data_end();

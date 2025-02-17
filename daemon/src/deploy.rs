@@ -96,10 +96,10 @@ impl<'a> Deploy<'a> {
                             "name": AGENT_APP_NAME,
                             "image": "ghcr.io/wqld/pmz-agent:0.1.0",
                             "ports": [{ "containerPort": 8100 }],
-                            // "env": [{
-                            //     "name": "RUST_LOG",
-                            //     "value": "debug"
-                            // }],
+                            "env": [{
+                                "name": "RUST_LOG",
+                                "value": "debug"
+                            }],
                             "volumeMounts": [
                                 {
                                     "name": TLS_SECRET_NAME,

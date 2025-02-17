@@ -8,7 +8,7 @@ use std::{
     time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{anyhow, bail, Result};
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA};
 use http::{Method, Request, StatusCode};
@@ -26,6 +26,12 @@ use kube::{
     runtime::wait::{await_condition, conditions::is_pod_running},
 };
 use log::{debug, error, info};
+use proxy::tunnel::{
+    client::{establish_http2_connection, TunnelClient, TunnelRequest},
+    PMZ_PROTO_HDR, PROTO_TCP,
+};
+use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
+use serde::{Deserialize, Serialize};
 use tokio::{
     net::UnixListener,
     sync::{broadcast, mpsc::Receiver, Mutex, RwLock},
@@ -38,7 +44,6 @@ use crate::{
     discovery::Discovery,
     forward::Forward,
     route::Route,
-    tunnel::{establish_http2_connection, Tunnel, TunnelRequest},
 };
 
 pub struct Command {
@@ -137,7 +142,9 @@ async fn handle_request(
             remove_dns(req.into_body(), service_registry, connection_manager).await
         }
         (&Method::GET, "/dns") => list_dns(service_registry, connection_manager).await,
-        (&Method::POST, "/intercept") => start_intercept(tunnel_port).await,
+        (&Method::POST, "/intercept") => {
+            start_intercept(req.into_body(), tunnel_port, service_registry).await
+        }
         _ => not_found().await,
     }
 }
@@ -260,7 +267,7 @@ async fn connect(
     let route = Route::setup_routes(service_cidr_map).await?;
     let discovery = Discovery::new(service_registry);
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
-    let tunnel = Tunnel::new(tunnel_port, req_rx);
+    let tunnel = TunnelClient::new(tunnel_port, req_rx);
 
     tokio::spawn(async move { discovery.watch(client, shutdown_discovery).await });
     tokio::spawn(async move { forward.start(shutdown_forward).await });
@@ -460,18 +467,92 @@ async fn list_dns(
     Ok(Response::new(Full::from(services)))
 }
 
-async fn start_intercept(tunnel_port: u16) -> Result<Response<Full<Bytes>>> {
+async fn start_intercept(
+    req: Incoming,
+    tunnel_port: u16,
+    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+) -> Result<Response<Full<Bytes>>> {
+    let body = req.collect().await?.aggregate();
+    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
+    debug!("data: {props:?}");
+
+    let namespace = props["namespace"].as_str().unwrap_or("default");
+    let service_name = match props["service"].as_str() {
+        Some(service) => service,
+        None => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from("Please provide the service name."))?)
+        }
+    };
+    let dns_query = Discovery::create_dns_query(service_name, namespace)?;
+
+    let service_registry = service_registry.read().await;
+    let cluster_ip = match service_registry.get(&dns_query, 0) {
+        Ok(record) => record.ip,
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(
+                    "Failed to get the ClusterIp with the specified service name and namespace.",
+                ))?)
+        }
+    };
+
+    let (local_port, service_port) = match parse_ports(props["port"].as_str()) {
+        Ok((local, service)) => (local, service),
+        Err(e) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(e.to_string()))?)
+        }
+    };
+
+    debug!("local port: {local_port:?}, service port: {service_port:?}");
+
+    if let Err(e) = is_port_in_use(local_port) {
+        return Ok(Response::builder()
+            .status(StatusCode::BAD_REQUEST)
+            .body(Full::from(e.to_string()))?);
+    }
+
     let sender = establish_http2_connection("localhost", tunnel_port).await?;
     let mut send_req = sender.ready().await.unwrap();
 
     debug!("ok get h2 sender");
 
+    let body = IntercepRequest {
+        cluster_ip,
+        service_port,
+        target_port: local_port,
+    };
+
+    let body = serde_json::to_string(&body)?;
+
     let req = http::Request::builder()
-        .uri("/")
-        .method(http::Method::GET)
+        .uri("127.0.0.1:8101")
+        .method(http::Method::CONNECT)
+        .version(http::Version::HTTP_2)
+        .header(PMZ_PROTO_HDR, PROTO_TCP)
         .body(())?;
 
-    let (resp, _) = send_req.send_request(req, true)?;
+    let (resp, mut send) = send_req.send_request(req, false)?;
+
+    let method = http::Method::POST;
+    let uri = "/intercept";
+    let version = http::Version::HTTP_11;
+    let headers = format!(
+        "Host: {}\r\n Content-Type: {}\r\nContent-Length: {}\r\n",
+        "127.0.0.1:8101",
+        "application/json",
+        body.len()
+    );
+
+    let body = format!("{method:?} {uri} {version:?}\r\n{headers}\r\n{body}\r\n");
+    debug!("request body: {body:?}");
+
+    send.send_data(Bytes::from(body), true)?;
+
     let resp = resp.await?;
     let (parts, mut body) = resp.into_parts();
     let body = body.data().await.unwrap()?;
@@ -483,8 +564,45 @@ async fn start_intercept(tunnel_port: u16) -> Result<Response<Full<Bytes>>> {
         .unwrap())
 }
 
+fn parse_ports(port_input: Option<&str>) -> Result<(u16, u16)> {
+    port_input
+        .and_then(|v| v.split_once(':'))
+        .and_then(|(local, service)| {
+            let local = local.parse::<u16>().ok()?;
+            let service = service.parse::<u16>().ok()?;
+            Some((local, service))
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "Please specify the port information using the --port option.
+                The format should be LOCAL_PORT:SERVICE_PORT (e.g., 8080:80)."
+            )
+        })
+}
+
+fn is_port_in_use(port: u16) -> Result<()> {
+    let mut netlink = Netlink::new();
+    let tcpv4_diags = netlink.tcp_diagnostics(DiagFamily::V4)?;
+
+    for diag in tcpv4_diags {
+        if diag.msg.state == 10 && diag.msg.id.src_port == port {
+            debug!("match {diag:?}");
+            return Ok(());
+        }
+    }
+
+    bail!("There is no process listening on port {port}");
+}
+
 async fn not_found() -> Result<Response<Full<Bytes>>> {
     Ok(Response::builder()
         .status(StatusCode::NOT_FOUND)
         .body(Full::from("Not found"))?)
+}
+
+#[derive(Serialize, Deserialize)]
+struct IntercepRequest {
+    cluster_ip: u32,
+    service_port: u16,
+    target_port: u16,
 }

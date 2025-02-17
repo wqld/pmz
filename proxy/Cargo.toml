@@ -1,0 +1,26 @@
+[package]
+name = "proxy"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = { workspace = true, default-features = true }
+env_logger = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+
+futures = "0.3"
+hyper = { version = "1.5.2", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+serde_json = "1.0.133"
+serde = { version = "1.0.216", features = ["derive"] }
+http-body-util = "0.1"
+bytes = "1"
+http = "1"
+rustls = "0.23.20"
+rustls-pemfile = "2.2.0"
+tokio-rustls = "0.26.1"
+hyper-rustls = "0.27.4"
+h2 = "0.4.7"
+rcgen = "0.13"
+udp-stream = "0.0.12"

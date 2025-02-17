@@ -1,15 +1,15 @@
+use ::proxy::tunnel::client::TunnelRequest;
 use aya::{
     maps::HashMap,
     programs::{tc, SchedClassifier, TcAttachType},
 };
 use clap::Parser;
 use command::Command;
-use common::{DnsQuery, DnsRecordA, NatKey, NatOrigin};
+use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
 use log::{debug, warn};
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
 use tokio::signal;
-use tunnel::TunnelRequest;
 
 mod command;
 mod connect;
@@ -19,7 +19,6 @@ mod forward;
 mod proxy;
 mod route;
 mod sudo;
-mod tunnel;
 
 #[derive(Debug, Parser)]
 struct Opt {
@@ -80,7 +79,7 @@ async fn main() -> anyhow::Result<()> {
 
     let (req_tx, req_rx) = tokio::sync::mpsc::channel::<TunnelRequest>(1);
 
-    let nat_table: HashMap<_, NatKey, NatOrigin> =
+    let nat_table: HashMap<_, SockPair, SockAddr> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
 
     let service_registry: HashMap<_, DnsQuery, DnsRecordA> =
