@@ -31,7 +31,7 @@ use proxy::tunnel::{
     PMZ_PROTO_HDR, PROTO_TCP,
 };
 use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use tokio::{
     net::UnixListener,
     sync::{broadcast, mpsc::Receiver, Mutex, RwLock},
@@ -542,7 +542,7 @@ async fn start_intercept(
     let uri = "/intercept";
     let version = http::Version::HTTP_11;
     let headers = format!(
-        "Host: {}\r\n Content-Type: {}\r\nContent-Length: {}\r\n",
+        "Host: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
         "127.0.0.1:8101",
         "application/json",
         body.len()
@@ -600,7 +600,7 @@ async fn not_found() -> Result<Response<Full<Bytes>>> {
         .body(Full::from("Not found"))?)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize)]
 struct IntercepRequest {
     cluster_ip: u32,
     service_port: u16,
