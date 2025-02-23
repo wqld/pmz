@@ -1,7 +1,7 @@
 [package]
 name = "pmzctl"
 version = "0.1.7"
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/wqld/pmz/tree/main/ctl"
 description = "A command-line tool that allows you to communicate with the pmz daemon to enable pmz features"

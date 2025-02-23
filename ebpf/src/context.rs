@@ -5,8 +5,8 @@ use core::{
 };
 
 use aya_ebpf::{
-    bindings::{__sk_buff, xdp_md},
     EbpfContext,
+    bindings::{__sk_buff, xdp_md},
 };
 use common::DnsHdr;
 use network_types::{
@@ -126,35 +126,43 @@ where
         Ok(())
     }
 
-    pub unsafe fn swap_src_dst(&self) {
-        mem::swap(&mut (*self.eth_hdr).src_addr, &mut (*self.eth_hdr).dst_addr);
-        mem::swap(&mut (*self.ip_hdr).src_addr, &mut (*self.ip_hdr).dst_addr);
-        mem::swap(&mut (*self.udp_hdr).source, &mut (*self.udp_hdr).dest);
+    pub fn swap_src_dst(&self) {
+        unsafe {
+            mem::swap(&mut (*self.eth_hdr).src_addr, &mut (*self.eth_hdr).dst_addr);
+            mem::swap(&mut (*self.ip_hdr).src_addr, &mut (*self.ip_hdr).dst_addr);
+            mem::swap(&mut (*self.udp_hdr).source, &mut (*self.udp_hdr).dest);
+        }
     }
 
-    pub unsafe fn ignore_udp_csum(&self) {
+    pub fn ignore_udp_csum(&self) {
         let udp_len = self.len() as usize - EthHdr::LEN - Ipv4Hdr::LEN;
-        (*self.udp_hdr).len = u16::to_be(udp_len as u16);
-        (*self.udp_hdr).check = 0;
+        unsafe {
+            (*self.udp_hdr).len = u16::to_be(udp_len as u16);
+            (*self.udp_hdr).check = 0;
+        }
     }
 
-    pub unsafe fn recompute_ip_csum(&self) {
+    pub fn recompute_ip_csum(&self) {
         let ip_len = self.len() as usize - EthHdr::LEN;
-        (*self.ip_hdr).tot_len = u16::to_be(ip_len as u16);
-        (*self.ip_hdr).check = self.compute_ip_csum(false);
+        unsafe {
+            (*self.ip_hdr).tot_len = u16::to_be(ip_len as u16);
+            (*self.ip_hdr).check = self.compute_ip_csum(false);
+        }
     }
 
-    pub unsafe fn compute_ip_csum(&self, verify: bool) -> u16 {
+    pub fn compute_ip_csum(&self, verify: bool) -> u16 {
         let mut checksum = 0u32;
         let mut next = self.ip_hdr as *mut u16;
 
-        if !verify {
-            (*self.ip_hdr).check = 0;
-        }
+        unsafe {
+            if !verify {
+                (*self.ip_hdr).check = 0;
+            }
 
-        for _ in 0..(mem::size_of::<Ipv4Hdr>() >> 1) {
-            checksum += *next as u32;
-            next = next.add(1);
+            for _ in 0..(mem::size_of::<Ipv4Hdr>() >> 1) {
+                checksum += *next as u32;
+                next = next.add(1);
+            }
         }
 
         !((checksum & 0xffff) + (checksum >> 16)) as u16

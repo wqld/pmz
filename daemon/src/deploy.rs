@@ -27,7 +27,8 @@ impl<'a> Deploy<'a> {
         let pods: Api<Pod> = Api::all(client);
 
         let lp = ListParams::default().labels(label);
-        match pods.list(&lp).await?.iter().last() {
+        let res = pods.list(&lp).await?;
+        match res.iter().last() {
             Some(p) => Ok((
                 p.name_any(),
                 p.meta().namespace.clone().unwrap_or("default".to_owned()),
