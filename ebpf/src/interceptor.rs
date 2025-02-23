@@ -5,8 +5,8 @@ use aya_log_ebpf::debug;
 use common::SockAddr;
 
 use crate::{
-    context::{Context, Protocol},
     INTERCEPT_RULE,
+    context::{Context, Protocol},
 };
 
 pub struct Interceptor<'a> {
@@ -32,40 +32,42 @@ impl<'a> Interceptor<'a> {
         Self { ctx }
     }
 
-    pub unsafe fn handle_xdp(&mut self) -> Result<u32, ()> {
-        let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
-        let (src_port, dst_port) = match self.proto {
-            Some(Protocol::TCP) => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
-            Some(Protocol::UDP) => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
-            _ => return Ok(XDP_PASS),
-        };
+    pub fn handle_xdp(&mut self) -> Result<u32, ()> {
+        unsafe {
+            let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
+            let (src_port, dst_port) = match self.proto {
+                Some(Protocol::TCP) => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
+                Some(Protocol::UDP) => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                _ => return Ok(XDP_PASS),
+            };
 
-        // debug!(
-        //     self.ctx.ctx,
-        //     "{:i}:{} -> {:i}:{}",
-        //     u32::from_be(src_addr),
-        //     u16::from_be(src_port),
-        //     u32::from_be(dst_addr),
-        //     u16::from_be(dst_port),
-        // );
+            // debug!(
+            //     self.ctx.ctx,
+            //     "{:i}:{} -> {:i}:{}",
+            //     u32::from_be(src_addr),
+            //     u16::from_be(src_port),
+            //     u32::from_be(dst_addr),
+            //     u16::from_be(dst_port),
+            // );
 
-        let key = SockAddr {
-            addr: dst_addr,
-            dummy: 0,
-            port: dst_port,
-        };
+            let key = SockAddr {
+                addr: dst_addr,
+                dummy: 0,
+                port: dst_port,
+            };
 
-        if let Some(rule) = INTERCEPT_RULE.get(&key) {
-            debug!(
-                self.ctx.ctx,
-                "xdp src: {:i}:{}, dst: {:i}:{}->{:i}:{}",
-                u32::from_be(src_addr),
-                u16::from_be(src_port),
-                u32::from_be(dst_addr),
-                u16::from_be(dst_port),
-                u32::from_be(rule.addr),
-                u16::from_be(rule.port),
-            );
+            if let Some(rule) = INTERCEPT_RULE.get(&key) {
+                debug!(
+                    self.ctx.ctx,
+                    "xdp src: {:i}:{}, dst: {:i}:{}->{:i}:{}",
+                    u32::from_be(src_addr),
+                    u16::from_be(src_port),
+                    u32::from_be(dst_addr),
+                    u16::from_be(dst_port),
+                    u32::from_be(rule.addr),
+                    u16::from_be(rule.port),
+                );
+            }
         }
 
         Ok(XDP_PASS)

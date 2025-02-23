@@ -207,7 +207,8 @@ async fn connect(
     }
 
     let client = loop {
-        match kube::Client::try_default().await {
+        let c = kube::Client::try_default().await;
+        match c {
             Ok(client) => {
                 info!("Connected to the cluster");
                 break client;
@@ -278,10 +279,11 @@ async fn connect(
         shutdown_tx,
     };
 
-    match connection_manager
+    let res = connection_manager
         .connections
-        .insert("default".to_string(), connection)
-    {
+        .insert("default".to_string(), connection);
+
+    match res {
         Some(_) => Ok(Response::new(Full::from("Connected what?!"))),
         None => Ok(Response::new(Full::from("Connected"))),
     }

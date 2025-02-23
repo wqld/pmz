@@ -95,32 +95,35 @@ async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::
 
 async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     debug!("handle_connect: {:?}", req);
-    if let Some(addr) = host_addr(req.uri()) {
-        let proto = req
-            .headers()
-            .get(PMZ_PROTO_HDR)
-            .and_then(|hdr_val| hdr_val.to_str().ok())
-            .map(|proto| PROTO::from(proto))
-            .unwrap_or_else(|| PROTO::TCP);
+    match host_addr(req.uri()) {
+        Some(addr) => {
+            let proto = req
+                .headers()
+                .get(PMZ_PROTO_HDR)
+                .and_then(|hdr_val| hdr_val.to_str().ok())
+                .map(|proto| PROTO::from(proto))
+                .unwrap_or_else(|| PROTO::TCP);
 
-        tokio::task::spawn(async move {
-            match hyper::upgrade::on(req).await {
-                Ok(upgraded) => {
-                    if let Err(e) = tunnel(upgraded, addr, proto).await {
-                        error!("server io error: {}", e);
-                    };
+            tokio::task::spawn(async move {
+                match hyper::upgrade::on(req).await {
+                    Ok(upgraded) => {
+                        if let Err(e) = tunnel(upgraded, addr, proto).await {
+                            error!("server io error: {}", e);
+                        };
+                    }
+                    Err(e) => error!("upgrade error: {}", e),
                 }
-                Err(e) => error!("upgrade error: {}", e),
-            }
-        });
+            });
 
-        Ok(Response::new(empty()))
-    } else {
-        error!("CONNECT host is not socket addr: {:?}", req.uri());
-        let mut resp = Response::new(full("CONNECT must be to a socket address"));
-        *resp.status_mut() = http::StatusCode::BAD_REQUEST;
+            Ok(Response::new(empty()))
+        }
+        _ => {
+            error!("CONNECT host is not socket addr: {:?}", req.uri());
+            let mut resp = Response::new(full("CONNECT must be to a socket address"));
+            *resp.status_mut() = http::StatusCode::BAD_REQUEST;
 
-        Ok(resp)
+            Ok(resp)
+        }
     }
 }
 
@@ -156,12 +159,15 @@ async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()
 
     let (from_client, from_server) = match proto {
         PROTO::TCP => {
-            let mut server = TcpStream::connect(addr).await?;
-            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?
+            tokio::io::copy_bidirectional(&mut upgraded, &mut TcpStream::connect(addr).await?)
+                .await?
         }
         PROTO::UDP => {
-            let mut server = UdpStream::connect(addr.parse::<SocketAddr>().unwrap()).await?;
-            tokio::io::copy_bidirectional(&mut upgraded, &mut server).await?
+            tokio::io::copy_bidirectional(
+                &mut upgraded,
+                &mut UdpStream::connect(addr.parse::<SocketAddr>().unwrap()).await?,
+            )
+            .await?
         }
     };
 

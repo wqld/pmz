@@ -5,17 +5,17 @@ use core::{
 };
 
 use aya_ebpf::{
+    EbpfContext,
     bindings::{__sk_buff, BPF_F_INGRESS, TC_ACT_PIPE, TC_ACT_REDIRECT},
     helpers::{bpf_redirect, bpf_skb_change_tail},
     programs::TcContext,
-    EbpfContext,
 };
 use aya_log_ebpf::{debug, error};
 use common::{DnsHdr, DnsQuery, DnsRecordA, MAX_DNS_NAME_LENGTH};
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, udp::UdpHdr};
 // use pmz_ebpf::{class_to_str, record_type_to_str};
 
-use crate::{context::Context, SERVICE_REGISTRY};
+use crate::{SERVICE_REGISTRY, context::Context};
 
 pub const MAX_DNS_BUFFER_LENGTH: usize = DnsAnswer::LEN + 4;
 
@@ -148,12 +148,12 @@ impl<'a> DnsResolver<'a> {
                 self.update_hdrs_for_dns()
                     .map_err(|_| "failed to update headers for dns")?;
 
-                unsafe {
-                    self.swap_src_dst();
-                    self.ignore_udp_csum();
-                    self.set_dns_response_flags();
-                    self.recompute_ip_csum();
+                self.swap_src_dst();
+                self.ignore_udp_csum();
+                self.set_dns_response_flags();
+                self.recompute_ip_csum();
 
+                unsafe {
                     let raw_skb = &*(self.as_ptr() as *mut __sk_buff);
                     bpf_redirect(raw_skb.ifindex, BPF_F_INGRESS as u64);
                 }
@@ -175,10 +175,12 @@ impl<'a> DnsResolver<'a> {
         query == 0 && opcode == 0
     }
 
-    unsafe fn set_dns_response_flags(&mut self) {
-        (*self.dns_hdr).flags |= 0x8080;
-        (*self.dns_hdr).answer_count = 1u16.to_be();
-        (*self.dns_hdr).additional_count = 0u16.to_be();
+    fn set_dns_response_flags(&mut self) {
+        unsafe {
+            (*self.dns_hdr).flags |= 0x8080;
+            (*self.dns_hdr).answer_count = 1u16.to_be();
+            (*self.dns_hdr).additional_count = 0u16.to_be();
+        }
     }
 
     #[inline(always)]

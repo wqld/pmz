@@ -14,8 +14,8 @@ use memoffset::offset_of;
 use network_types::{eth::EthHdr, ip::Ipv4Hdr, tcp::TcpHdr, udp::UdpHdr};
 
 use crate::{
-    context::{Context, Protocol},
     NAT_TABLE, SERVICE_CIDR_MAP,
+    context::{Context, Protocol},
 };
 
 pub struct TrafficForwarder<'a> {
@@ -101,7 +101,7 @@ impl<'a> TrafficForwarder<'a> {
     }
 
     #[inline(always)]
-    unsafe fn dnat(
+    fn dnat(
         &mut self,
         kind: Protocol,
         src_addr: u32,
@@ -146,10 +146,12 @@ impl<'a> TrafficForwarder<'a> {
             dst_port: proxy_port,
         };
 
-        match NAT_TABLE.get(&nat_key) {
-            Some(_) => return Ok(TC_ACT_PIPE),
-            None => {}
-        };
+        unsafe {
+            match NAT_TABLE.get(&nat_key) {
+                Some(_) => return Ok(TC_ACT_PIPE),
+                None => {}
+            };
+        }
 
         let nat_orign = SockAddr {
             addr: dst_addr,
@@ -176,7 +178,7 @@ impl<'a> TrafficForwarder<'a> {
     }
 
     #[inline(always)]
-    unsafe fn snat(
+    fn snat(
         &mut self,
         kind: Protocol,
         src_addr: u32,
@@ -191,38 +193,40 @@ impl<'a> TrafficForwarder<'a> {
             dst_port: src_port,
         };
 
-        let nat_origin = match NAT_TABLE.get(&nat_key) {
-            Some(origin) => origin,
-            None => return Ok(TC_ACT_PIPE),
-        };
+        unsafe {
+            let nat_origin = match NAT_TABLE.get(&nat_key) {
+                Some(origin) => origin,
+                None => return Ok(TC_ACT_PIPE),
+            };
 
-        debug!(
-            self.ctx.ctx,
-            "{} egress src: {:i}:{}->{:i}:{}, dst: {:i}:{}",
-            kind.kind(),
-            u32::from_be(src_addr),
-            u16::from_be(src_port),
-            u32::from_be(nat_origin.addr),
-            u16::from_be(nat_origin.port),
-            u32::from_be(dst_addr),
-            u16::from_be(dst_port),
-        );
+            debug!(
+                self.ctx.ctx,
+                "{} egress src: {:i}:{}->{:i}:{}, dst: {:i}:{}",
+                kind.kind(),
+                u32::from_be(src_addr),
+                u16::from_be(src_port),
+                u32::from_be(nat_origin.addr),
+                u16::from_be(nat_origin.port),
+                u32::from_be(dst_addr),
+                u16::from_be(dst_port),
+            );
 
-        let (port_offset, csum_offset) = match kind {
-            Protocol::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
-            Protocol::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
-            _ => return Ok(TC_ACT_PIPE),
-        };
+            let (port_offset, csum_offset) = match kind {
+                Protocol::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
+                Protocol::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
+                _ => return Ok(TC_ACT_PIPE),
+            };
 
-        self.nat_v4_rewrite_headers(
-            src_addr,
-            nat_origin.addr,
-            offset_of!(Ipv4Hdr, src_addr),
-            src_port,
-            nat_origin.port,
-            port_offset,
-            csum_offset,
-        )?;
+            self.nat_v4_rewrite_headers(
+                src_addr,
+                nat_origin.addr,
+                offset_of!(Ipv4Hdr, src_addr),
+                src_port,
+                nat_origin.port,
+                port_offset,
+                csum_offset,
+            )?;
+        }
 
         Ok(TC_ACT_PIPE)
     }

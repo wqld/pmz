@@ -8,8 +8,8 @@ mod resolver;
 
 use aya_ebpf::{
     bindings::{
-        xdp_action::{XDP_ABORTED, XDP_PASS},
         TC_ACT_PIPE,
+        xdp_action::{XDP_ABORTED, XDP_PASS},
     },
     macros::{classifier, map, xdp},
     maps::{HashMap, LruHashMap},
@@ -104,13 +104,13 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
 
 #[xdp]
 pub fn interceptor(mut ctx: XdpContext) -> u32 {
-    match unsafe { try_interceptor(&mut ctx) } {
+    match try_interceptor(&mut ctx) {
         Ok(ret) => ret,
         Err(_) => XDP_ABORTED,
     }
 }
 
-unsafe fn try_interceptor(ctx: &mut XdpContext) -> Result<u32, ()> {
+fn try_interceptor(ctx: &mut XdpContext) -> Result<u32, ()> {
     // info!(ctx, "received a packet");
 
     let mut ctx = match Context::load(ctx, Kind::XDP) {
