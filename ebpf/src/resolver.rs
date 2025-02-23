@@ -148,12 +148,12 @@ impl<'a> DnsResolver<'a> {
                 self.update_hdrs_for_dns()
                     .map_err(|_| "failed to update headers for dns")?;
 
-                unsafe {
-                    self.swap_src_dst();
-                    self.ignore_udp_csum();
-                    self.set_dns_response_flags();
-                    self.recompute_ip_csum();
+                self.swap_src_dst();
+                self.ignore_udp_csum();
+                self.set_dns_response_flags();
+                self.recompute_ip_csum();
 
+                unsafe {
                     let raw_skb = &*(self.as_ptr() as *mut __sk_buff);
                     bpf_redirect(raw_skb.ifindex, BPF_F_INGRESS as u64);
                 }
