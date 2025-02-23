@@ -30,8 +30,9 @@ impl Server {
         info!("Health check listening on {}", api_addr);
 
         loop {
-            let (stream, _) = api_listener.accept().await.unwrap();
+            let (stream, peer_addr) = api_listener.accept().await.unwrap();
             let intercept_rule = self.intercept_rule.clone();
+            debug!("peer addr: {peer_addr:?}");
 
             tokio::spawn(async move {
                 if let Err(e) = http1::Builder::new()

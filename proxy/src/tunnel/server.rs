@@ -47,8 +47,9 @@ impl TunnelServer {
         info!("Listening on {} w/ tls", addr);
 
         loop {
-            let (tcp_stream, _) = proxy_listener.accept().await?;
+            let (tcp_stream, peer_addr) = proxy_listener.accept().await?;
             let tls_acceptor = proxy_tls_acceptor.clone();
+            debug!("peer addr: {peer_addr:?}");
 
             tokio::task::spawn(async move {
                 let tls_stream = match tls_acceptor.accept(tcp_stream).await {
