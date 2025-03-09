@@ -4,18 +4,19 @@ use anyhow::Result;
 use h2::client::SendRequest;
 use hyper::body::Bytes;
 use log::debug;
-use rustls::{pki_types::ServerName, ClientConfig};
+use rustls::{ClientConfig, pki_types::ServerName};
+use socket2::{SockRef, TcpKeepalive};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
-    sync::{broadcast, mpsc::Receiver, Mutex},
+    sync::{Mutex, broadcast, mpsc::Receiver},
     time::Instant,
 };
 use tokio_rustls::TlsConnector;
 
 use crate::tunnel::stream::TunnelStream;
 
-use super::{verifier::PmzCertVerifier, PMZ_PROTO_HDR};
+use super::{PMZ_PROTO_HDR, verifier::PmzCertVerifier};
 
 pub struct TunnelClient {
     tunnel_port: u16,
@@ -117,6 +118,11 @@ impl TunnelClient {
 pub async fn establish_http2_connection(host: &str, port: u16) -> Result<SendRequest<Bytes>> {
     let tunnel_addr = format!("{}:{}", host, port);
     let stream = TcpStream::connect(tunnel_addr).await?;
+    let keepalive = TcpKeepalive::new()
+        .with_time(Duration::from_secs(30))
+        .with_interval(Duration::from_secs(30));
+    let sock_ref = SockRef::from(&stream);
+    sock_ref.set_tcp_keepalive(&keepalive)?;
 
     let mut client_config = ClientConfig::builder()
         .dangerous()
