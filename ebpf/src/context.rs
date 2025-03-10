@@ -84,6 +84,7 @@ where
         }
     }
 
+    #[inline(always)]
     pub fn load(ctx: &'a mut C, kind: Kind) -> Result<Self, ()> {
         let mut ctx = Self::new(ctx, kind);
 

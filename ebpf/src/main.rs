@@ -48,7 +48,10 @@ pub fn resolver(mut ctx: TcContext) -> i32 {
 fn try_resolve_dns(ctx: &mut TcContext) -> Result<i32, &'static str> {
     let mut ctx = match Context::load(ctx, Kind::TC) {
         Ok(ctx) => ctx,
-        _ => return Ok(TC_ACT_PIPE),
+        _ => {
+            error!(ctx, "failed to load context");
+            return Ok(TC_ACT_PIPE);
+        }
     };
 
     match ctx.proto {
