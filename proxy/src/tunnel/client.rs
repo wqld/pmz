@@ -98,9 +98,9 @@ impl TunnelClient {
 
         tokio::spawn(async move {
             let req = http::Request::builder()
-                .uri("127.0.0.1:8101")
-                .method(http::Method::CONNECT)
-                .version(http::Version::HTTP_2)
+                .uri("/health")
+                .method(http::Method::GET)
+                .version(http::Version::HTTP_11)
                 .body(())
                 .unwrap();
 

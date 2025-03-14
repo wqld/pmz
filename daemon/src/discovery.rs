@@ -6,14 +6,16 @@ use common::{DnsQuery, DnsRecordA, MAX_DNS_NAME_LENGTH};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
-    runtime::{
-        watcher::{self, watcher, Event},
-        WatchStreamExt,
-    },
     Api, ResourceExt,
+    runtime::{
+        WatchStreamExt,
+        watcher::{self, Event, watcher},
+    },
 };
 use log::{debug, error, info};
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{RwLock, broadcast};
+
+use crate::connect::ConnectionStatus;
 
 pub struct Discovery {
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
@@ -28,12 +30,15 @@ impl Discovery {
         &self,
         client: kube::Client,
         mut shutdown: broadcast::Receiver<()>,
+        connection_status: Arc<RwLock<ConnectionStatus>>,
     ) -> Result<()> {
         let api: Api<Service> = Api::all(client);
 
         let mut stream = watcher(api, watcher::Config::default())
             .default_backoff()
             .boxed();
+
+        ConnectionStatus::discovery(&connection_status, true, "Up").await;
 
         loop {
             tokio::select! {
@@ -46,6 +51,7 @@ impl Discovery {
                 _ = shutdown.recv() => {
                     debug!("discovery shutdown");
                     self.clean_registry().await?;
+                    ConnectionStatus::clear_discovery(&connection_status).await;
                     return Ok(())
                 }
             }

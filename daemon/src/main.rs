@@ -1,15 +1,18 @@
+use std::sync::Arc;
+
 use ::proxy::tunnel::client::TunnelRequest;
 use aya::{
     maps::HashMap,
-    programs::{tc, SchedClassifier, TcAttachType},
+    programs::{SchedClassifier, TcAttachType, tc},
 };
 use clap::Parser;
 use command::Command;
 use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
+use connect::ConnectionStatus;
 use log::{debug, warn};
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
-use tokio::signal;
+use tokio::{signal, sync::RwLock};
 
 mod command;
 mod connect;
@@ -88,8 +91,16 @@ async fn main() -> anyhow::Result<()> {
     let service_cidr_map: HashMap<_, u8, u32> =
         HashMap::try_from(ebpf.take_map("SERVICE_CIDR_MAP").unwrap())?;
 
-    let proxy = Proxy::new(nat_table, req_tx);
-    let command = Command::new(req_rx, service_registry, service_cidr_map);
+    let connection_status = Arc::new(RwLock::new(ConnectionStatus::new()));
+    let connection_status_clone = connection_status.clone();
+
+    let proxy = Proxy::new(nat_table, req_tx, connection_status);
+    let command = Command::new(
+        req_rx,
+        service_registry,
+        service_cidr_map,
+        connection_status_clone,
+    );
 
     tokio::spawn(async move { proxy.start().await });
     tokio::spawn(async move { command.run().await });

@@ -1,16 +1,18 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, sync::Arc};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use log::{debug, error};
+use log::{debug, error, info};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
-    sync::broadcast,
+    sync::{RwLock, broadcast},
 };
 use tokio_stream::wrappers::TcpListenerStream;
+
+use crate::connect::ConnectionStatus;
 
 pub struct Forward {
     agent_name: String,
@@ -29,11 +31,23 @@ impl Forward {
         }
     }
 
-    pub async fn start(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
+    pub async fn start(
+        &self,
+        mut shutdown: broadcast::Receiver<()>,
+        conn_stat: Arc<RwLock<ConnectionStatus>>,
+    ) -> Result<()> {
         let addr = SocketAddr::from(([127, 0, 0, 1], self.tunnel_port));
 
-        let listener = TcpListener::bind(addr).await?;
-        let mut stream = TcpListenerStream::new(listener);
+        let mut stream = match TcpListener::bind(addr).await {
+            Ok(listener) => TcpListenerStream::new(listener),
+            Err(err) => {
+                ConnectionStatus::forward(&conn_stat, true, &err.to_string()).await;
+                return Err(Error::new(err));
+            }
+        };
+
+        ConnectionStatus::forward(&conn_stat, true, "Up").await;
+        info!("Listening on {addr:?}");
 
         loop {
             tokio::select! {
@@ -45,6 +59,7 @@ impl Forward {
                 },
                 _ = shutdown.recv() => {
                     debug!("forward shutdown");
+                    ConnectionStatus::clear_forward(&conn_stat).await;
                     return Ok(())
                 }
             }
