@@ -1,18 +1,15 @@
 use std::{fs, io, net::SocketAddr, sync::Arc};
 
 use anyhow::Result;
-use bytes::Bytes;
-use http::{Method, Request, Response};
-use http_body_util::{combinators::BoxBody, BodyExt, Empty, Full};
-use hyper::{
-    body::Incoming, client::conn::http1, server::conn::http2, service::service_fn,
-    upgrade::Upgraded,
-};
+use bytes::{Buf, Bytes};
+use http::{Method, Request, Response, StatusCode};
+use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
+use hyper::{body::Incoming, server::conn::http2, service::service_fn, upgrade::Upgraded};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use log::{debug, error, info};
 use rustls::{
-    pki_types::{CertificateDer, PrivateKeyDer},
     ServerConfig,
+    pki_types::{CertificateDer, PrivateKeyDer},
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
@@ -130,25 +127,11 @@ async fn handle_connect(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes
 async fn handle_http(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
     debug!("handle_http: {:?}", req);
 
-    let host = req.uri().host().expect("uri has no host");
-    let port = req.uri().port_u16().unwrap_or(80);
-
-    let stream = TcpStream::connect((host, port)).await.unwrap();
-
-    let (mut sender, conn) = http1::Builder::new()
-        .preserve_header_case(true)
-        .title_case_headers(true)
-        .handshake(TokioIo::new(stream))
-        .await?;
-
-    tokio::task::spawn(async move {
-        if let Err(err) = conn.await {
-            error!("Connection failed: {:?}", err);
-        }
-    });
-
-    let resp = sender.send_request(req).await?;
-    Ok(resp.map(|b| b.boxed()))
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/health") => Ok(Response::new(full("healthy"))),
+        (&Method::POST, "/intercept") => start_intercept(req.into_body()).await,
+        _ => not_found(),
+    }
 }
 
 async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()> {
@@ -177,6 +160,21 @@ async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()
     );
 
     Ok(())
+}
+
+async fn start_intercept(req: Incoming) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    debug!("start_intercept with {req:?}");
+    let body = req.collect().await?.aggregate();
+    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
+    debug!("data: {props:?}");
+
+    Ok(Response::new(full("intercept started")))
+}
+
+fn not_found() -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
+    Ok(Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .body(full("Not found"))?)
 }
 
 fn host_addr(uri: &http::Uri) -> Option<String> {

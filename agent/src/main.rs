@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use aya::maps::HashMap;
 use aya::programs::{Xdp, XdpFlags};
 use clap::Parser;
@@ -60,10 +60,10 @@ async fn main() -> Result<()> {
     interceptor.load()?;
     interceptor.attach(&args.iface, XdpFlags::default())?;
 
-    let intercept_rule: HashMap<_, SockAddr, SockAddr> =
+    let _intercept_rule: HashMap<_, SockAddr, SockAddr> =
         HashMap::try_from(ebpf.take_map("INTERCEPT_RULE").unwrap())?;
 
-    let server = Server::new(args.api_port, intercept_rule);
+    let server = Server::new(args.api_port);
 
     let tunnel = TunnelServer::new(tunnel::server::Args {
         ip: args.ip,

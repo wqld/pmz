@@ -8,16 +8,16 @@ use std::{
     time::Duration,
 };
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA};
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::{
+    Response,
     body::{Buf, Bytes, Incoming},
     server::conn::http1,
     service::service_fn,
-    Response,
 };
 use hyper_util::rt::TokioIo;
 use k8s_openapi::api::core::v1::{Pod, Secret, Service};
@@ -26,20 +26,17 @@ use kube::{
     runtime::wait::{await_condition, conditions::is_pod_running},
 };
 use log::{debug, error, info};
-use proxy::tunnel::{
-    client::{establish_http2_connection, TunnelClient, TunnelRequest},
-    PMZ_PROTO_HDR, PROTO_TCP,
-};
+use proxy::tunnel::client::{TunnelClient, TunnelRequest, establish_http2_connection};
 use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
 use serde::Serialize;
 use tokio::{
     net::UnixListener,
-    sync::{broadcast, mpsc::Receiver, Mutex, RwLock},
+    sync::{Mutex, RwLock, broadcast, mpsc::Receiver},
     time::sleep,
 };
 
 use crate::{
-    connect::{Connection, ConnectionManager},
+    connect::{Connection, ConnectionManager, ConnectionStatus},
     deploy::Deploy,
     discovery::Discovery,
     forward::Forward,
@@ -51,6 +48,7 @@ pub struct Command {
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
+    connection_status: Arc<RwLock<ConnectionStatus>>,
 }
 
 impl Command {
@@ -58,12 +56,14 @@ impl Command {
         req_rx: Receiver<TunnelRequest>,
         service_registry: HashMap<MapData, DnsQuery, DnsRecordA>,
         service_cidr_map: HashMap<MapData, u8, u32>,
+        connection_status: Arc<RwLock<ConnectionStatus>>,
     ) -> Self {
         Self {
             req_rx: Arc::new(Mutex::new(req_rx)),
             service_registry: Arc::new(RwLock::new(service_registry)),
             service_cidr_map: Arc::new(RwLock::new(service_cidr_map)),
             connection_manager: Arc::new(Mutex::new(ConnectionManager::default())),
+            connection_status,
         }
     }
 
@@ -88,6 +88,7 @@ impl Command {
             let service_registry = self.service_registry.clone();
             let service_cidr_map = self.service_cidr_map.clone();
             let connection_manager = self.connection_manager.clone();
+            let connection_status = self.connection_status.clone();
 
             tokio::task::spawn(async move {
                 if let Err(err) = http1::Builder::new()
@@ -100,6 +101,7 @@ impl Command {
                                 service_registry.clone(),
                                 service_cidr_map.clone(),
                                 connection_manager.clone(),
+                                connection_status.clone(),
                             )
                         }),
                     )
@@ -118,6 +120,7 @@ async fn handle_request(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
+    connection_status: Arc<RwLock<ConnectionStatus>>,
 ) -> Result<Response<Full<Bytes>>> {
     let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
 
@@ -130,6 +133,7 @@ async fn handle_request(
                 service_registry,
                 service_cidr_map,
                 connection_manager,
+                connection_status,
                 tunnel_port,
             )
             .await
@@ -156,7 +160,7 @@ async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
         Ok(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("pmz-agent is already deployed"))?)
+                .body(Full::from("pmz-agent is already deployed"))?);
         }
         Err(_) => {}
     };
@@ -182,7 +186,7 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
             Err(_) => {
                 return Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Full::from("pmz-agent not found"))?)
+                    .body(Full::from("pmz-agent not found"))?);
             }
         };
 
@@ -197,6 +201,7 @@ async fn connect(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
+    connection_status: Arc<RwLock<ConnectionStatus>>,
     tunnel_port: u16,
 ) -> Result<Response<Full<Bytes>>> {
     let agent_port = 8100; // TODO
@@ -226,7 +231,7 @@ async fn connect(
             Err(_) => {
                 return Ok(Response::builder()
                     .status(StatusCode::NOT_FOUND)
-                    .body(Full::from("pmz-agent not found"))?)
+                    .body(Full::from("pmz-agent not found"))?);
             }
         };
 
@@ -265,14 +270,33 @@ async fn connect(
     let shutdown_forward = shutdown_tx.subscribe();
     let shutdown_tunnel = shutdown_tx.subscribe();
 
+    // let conn_stat_route = connection_status.clone();
+    let conn_stat_discovery = connection_status.clone();
+    let conn_stat_forward = connection_status.clone();
+    // let conn_stat_tunnel = connection_status.clone();
+
     let route = Route::setup_routes(service_cidr_map).await?;
     let discovery = Discovery::new(service_registry);
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
     let tunnel = TunnelClient::new(tunnel_port, req_rx);
 
-    tokio::spawn(async move { discovery.watch(client, shutdown_discovery).await });
-    tokio::spawn(async move { forward.start(shutdown_forward).await });
-    tokio::spawn(async move { tunnel.run(shutdown_tunnel).await });
+    tokio::spawn(async move {
+        discovery
+            .watch(client, shutdown_discovery, conn_stat_discovery)
+            .await
+    });
+    tokio::spawn(async move {
+        if let Err(e) = forward.start(shutdown_forward, conn_stat_forward).await {
+            error!("failed to run the forward task: {e:?}");
+        }
+    });
+    tokio::spawn(async move {
+        if let Err(e) = tunnel.run(shutdown_tunnel).await {
+            error!("failed to run the tunnel task: {e:?}");
+        }
+    });
+
+    while let None = connection_status.read().await.forward {}
 
     let connection = Connection {
         _route: route,
@@ -285,7 +309,10 @@ async fn connect(
 
     match res {
         Some(_) => Ok(Response::new(Full::from("Connected what?!"))),
-        None => Ok(Response::new(Full::from("Connected"))),
+        None => Ok(Response::new(Full::from(format!(
+            "{:#?}",
+            connection_status.read().await
+        )))),
     }
 }
 
@@ -298,10 +325,7 @@ async fn disconnect(
     };
 
     match connection {
-        Some(conn) => {
-            conn.shutdown_tx.send(())?;
-            Ok(Response::new(Full::from("Disconnected")))
-        }
+        Some(_) => Ok(Response::new(Full::from("Disconnected"))),
         None => Ok(Response::new(Full::from("No connection"))),
     }
 }
@@ -332,7 +356,7 @@ async fn add_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("Please provide the domain name."))?)
+                .body(Full::from("Please provide the domain name."))?);
         }
     };
 
@@ -352,7 +376,7 @@ async fn add_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("Please provide the service name."))?)
+                .body(Full::from("Please provide the service name."))?);
         }
     };
 
@@ -362,29 +386,28 @@ async fn add_dns(
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from(format!("Service {service_name:?} not founds")))?)
+                .body(Full::from(format!("Service {service_name:?} not founds")))?);
         }
     };
 
-    let service_ip = match service.spec {
-        Some(spec) => match spec.cluster_ip {
-            Some(ip) => ip,
+    let service_ip =
+        match service.spec {
+            Some(spec) => match spec.cluster_ip {
+                Some(ip) => ip,
+                None => {
+                    return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                        Full::from(format!(
+                            "Service {service_name:?} doesn't have the cluster ip"
+                        )),
+                    )?);
+                }
+            },
             None => {
-                return Ok(Response::builder()
-                    .status(StatusCode::BAD_REQUEST)
-                    .body(Full::from(format!(
-                        "Service {service_name:?} doesn't have the cluster ip"
-                    )))?)
+                return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                    Full::from(format!("Service {service_name:?} doesn't have the spec")),
+                )?);
             }
-        },
-        None => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::from(format!(
-                    "Service {service_name:?} doesn't have the spec"
-                )))?)
-        }
-    };
+        };
 
     let ipv4: Ipv4Addr = service_ip.parse()?;
 
@@ -424,7 +447,7 @@ async fn remove_dns(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("Please provide the domain name."))?)
+                .body(Full::from("Please provide the domain name."))?);
         }
     };
 
@@ -484,29 +507,28 @@ async fn start_intercept(
         None => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("Please provide the service name."))?)
+                .body(Full::from("Please provide the service name."))?);
         }
     };
     let dns_query = Discovery::create_dns_query(service_name, namespace)?;
 
     let service_registry = service_registry.read().await;
-    let cluster_ip = match service_registry.get(&dns_query, 0) {
-        Ok(record) => record.ip,
-        Err(_) => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::from(
+    let cluster_ip =
+        match service_registry.get(&dns_query, 0) {
+            Ok(record) => record.ip,
+            Err(_) => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                Full::from(
                     "Failed to get the ClusterIp with the specified service name and namespace.",
-                ))?)
-        }
-    };
+                ),
+            )?),
+        };
 
     let (local_port, service_port) = match parse_ports(props["port"].as_str()) {
         Ok((local, service)) => (local, service),
         Err(e) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from(e.to_string()))?)
+                .body(Full::from(e.to_string()))?);
         }
     };
 
@@ -519,9 +541,7 @@ async fn start_intercept(
     }
 
     let sender = establish_http2_connection("localhost", tunnel_port).await?;
-    let mut send_req = sender.ready().await.unwrap();
-
-    debug!("ok get h2 sender");
+    let mut send_req = sender.ready().await?;
 
     let body = IntercepRequest {
         cluster_ip,
@@ -532,25 +552,13 @@ async fn start_intercept(
     let body = serde_json::to_string(&body)?;
 
     let req = http::Request::builder()
-        .uri("127.0.0.1:8101")
-        .method(http::Method::CONNECT)
-        .version(http::Version::HTTP_2)
-        .header(PMZ_PROTO_HDR, PROTO_TCP)
+        .uri("/intercept")
+        .method(http::Method::POST)
+        .version(http::Version::HTTP_11)
         .body(())?;
 
     let (resp, mut send) = send_req.send_request(req, false)?;
 
-    let method = http::Method::POST;
-    let uri = "/intercept";
-    let version = http::Version::HTTP_11;
-    let headers = format!(
-        "Host: {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
-        "127.0.0.1:8101",
-        "application/json",
-        body.len()
-    );
-
-    let body = format!("{method:?} {uri} {version:?}\r\n{headers}\r\n{body}\r\n");
     debug!("request body: {body:?}");
 
     send.send_data(Bytes::from(body), true)?;
