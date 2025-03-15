@@ -85,14 +85,14 @@ where
     }
 
     #[inline(always)]
-    pub fn load(ctx: &'a mut C, kind: Kind) -> Result<Self, ()> {
+    pub fn load(ctx: &'a mut C, kind: Kind) -> Result<Self, &'static str> {
         let mut ctx = Self::new(ctx, kind);
 
         ctx.eth_hdr = ctx.ptr_at_mut(0)?;
 
         match unsafe { (*ctx.eth_hdr).ether_type } {
             EtherType::Ipv4 => {}
-            _ => return Err(()),
+            _ => return Err("IPv4 is supported only."),
         }
 
         ctx.ip_hdr = ctx.ptr_at_mut(EthHdr::LEN)?;
@@ -112,13 +112,13 @@ where
                 ctx.proto = Some(Protocol::TCP);
                 ctx.tcp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
             }
-            _ => return Err(()),
+            _ => return Err("TCP and UDP are supported only."),
         }
 
         Ok(ctx)
     }
 
-    pub fn update_hdrs_for_dns(&mut self) -> Result<(), ()> {
+    pub fn update_hdrs_for_dns(&mut self) -> Result<(), &'static str> {
         self.eth_hdr = self.ptr_at_mut(0)?;
         self.ip_hdr = self.ptr_at_mut(EthHdr::LEN)?;
         self.udp_hdr = self.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
@@ -170,13 +170,13 @@ where
     }
 
     #[inline(always)]
-    pub fn ptr_at_mut<T>(&self, offset: usize) -> Result<*mut T, ()> {
+    pub fn ptr_at_mut<T>(&self, offset: usize) -> Result<*mut T, &'static str> {
         let start = self.data();
         let end = self.data_end();
         let len = mem::size_of::<T>();
 
         if start + offset + len > end {
-            return Err(());
+            return Err("start + offset + len > end ");
         }
 
         Ok((start + offset) as *mut T)
