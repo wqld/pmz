@@ -38,6 +38,8 @@ http = "1.2.0"
 rustls = "0.23.20"
 rcgen = "0.13"
 udp-stream = "0.0.12"
+h2 = "0.4.7"
+uuid = { version = "1.16.0", features = ["v7"] }
 
 [build-dependencies]
 anyhow = { workspace = true }

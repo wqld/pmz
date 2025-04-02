@@ -12,7 +12,10 @@ use connect::ConnectionStatus;
 use log::{debug, warn};
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
-use tokio::{signal, sync::RwLock};
+use tokio::{
+    signal,
+    sync::{RwLock, mpsc},
+};
 
 mod command;
 mod connect;
@@ -80,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     egress_forwarder.load()?;
     egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
-    let (req_tx, req_rx) = tokio::sync::mpsc::channel::<TunnelRequest>(1);
+    let (req_tx, req_rx) = mpsc::channel::<TunnelRequest>(1);
 
     let nat_table: HashMap<_, SockPair, SockAddr> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;

@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA};
+use h2::client::SendRequest;
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -26,14 +27,23 @@ use kube::{
     runtime::wait::{await_condition, conditions::is_pod_running},
 };
 use log::{debug, error, info};
-use proxy::tunnel::client::{TunnelClient, TunnelRequest, establish_http2_connection};
+use proxy::{
+    InterceptContext, InterceptRequest,
+    tunnel::{
+        client::{TunnelClient, TunnelRequest, establish_h2_connection},
+        stream::TunnelStream,
+    },
+};
 use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
-use serde::Serialize;
 use tokio::{
-    net::UnixListener,
-    sync::{Mutex, RwLock, broadcast, mpsc::Receiver},
+    net::{TcpStream, UnixListener},
+    sync::{
+        Mutex, RwLock, broadcast,
+        mpsc::{self, Receiver},
+    },
     time::sleep,
 };
+use uuid::Uuid;
 
 use crate::{
     connect::{Connection, ConnectionManager, ConnectionStatus},
@@ -49,6 +59,8 @@ pub struct Command {
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
+    intercept_ctx_tx: Arc<Mutex<mpsc::Sender<InterceptContext>>>,
+    intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
 }
 
 impl Command {
@@ -58,12 +70,16 @@ impl Command {
         service_cidr_map: HashMap<MapData, u8, u32>,
         connection_status: Arc<RwLock<ConnectionStatus>>,
     ) -> Self {
+        let (intercept_ctx_tx, intercept_ctx_rx) = mpsc::channel::<InterceptContext>(1);
+
         Self {
             req_rx: Arc::new(Mutex::new(req_rx)),
             service_registry: Arc::new(RwLock::new(service_registry)),
             service_cidr_map: Arc::new(RwLock::new(service_cidr_map)),
             connection_manager: Arc::new(Mutex::new(ConnectionManager::default())),
             connection_status,
+            intercept_ctx_tx: Arc::new(Mutex::new(intercept_ctx_tx)),
+            intercept_ctx_rx: Arc::new(Mutex::new(intercept_ctx_rx)),
         }
     }
 
@@ -89,6 +105,8 @@ impl Command {
             let service_cidr_map = self.service_cidr_map.clone();
             let connection_manager = self.connection_manager.clone();
             let connection_status = self.connection_status.clone();
+            let intercept_ctx_tx = self.intercept_ctx_tx.clone();
+            let intercept_ctx_rx = self.intercept_ctx_rx.clone();
 
             tokio::task::spawn(async move {
                 if let Err(err) = http1::Builder::new()
@@ -102,6 +120,8 @@ impl Command {
                                 service_cidr_map.clone(),
                                 connection_manager.clone(),
                                 connection_status.clone(),
+                                intercept_ctx_tx.clone(),
+                                intercept_ctx_rx.clone(),
                             )
                         }),
                     )
@@ -121,6 +141,8 @@ async fn handle_request(
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
+    intercept_ctx_tx: Arc<Mutex<mpsc::Sender<InterceptContext>>>,
+    intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
 ) -> Result<Response<Full<Bytes>>> {
     let tunnel_port = 18329; // if we want to support multi cluster, this should be a range
 
@@ -134,6 +156,7 @@ async fn handle_request(
                 service_cidr_map,
                 connection_manager,
                 connection_status,
+                intercept_ctx_rx,
                 tunnel_port,
             )
             .await
@@ -147,7 +170,7 @@ async fn handle_request(
         }
         (&Method::GET, "/dns") => list_dns(service_registry, connection_manager).await,
         (&Method::POST, "/intercept") => {
-            start_intercept(req.into_body(), tunnel_port, service_registry).await
+            start_intercept(req.into_body(), connection_manager, intercept_ctx_tx).await
         }
         _ => not_found().await,
     }
@@ -172,7 +195,9 @@ async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
     let deploy = Deploy::new(client, namespace);
 
     deploy.deploy_tls_secret().await?;
+    deploy.add_rback_to_agent().await?;
     deploy.deploy_agent().await?;
+    deploy.expose_agent().await?;
 
     Ok(Response::new(Full::from("Agent deployed")))
 }
@@ -202,13 +227,16 @@ async fn connect(
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
+    intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
     tunnel_port: u16,
 ) -> Result<Response<Full<Bytes>>> {
     let agent_port = 8100; // TODO
 
-    let mut connection_manager = connection_manager.lock().await;
-    if connection_manager.check_connection("default") {
-        return Ok(Response::new(Full::from("Already connected")));
+    {
+        let conn_mgr = connection_manager.lock().await;
+        if conn_mgr.check_connection("default") {
+            return Ok(Response::new(Full::from("Already connected")));
+        }
     }
 
     let client = loop {
@@ -269,6 +297,10 @@ async fn connect(
     let shutdown_discovery = shutdown_tx.subscribe();
     let shutdown_forward = shutdown_tx.subscribe();
     let shutdown_tunnel = shutdown_tx.subscribe();
+    let mut shutdown_dial = shutdown_tx.subscribe();
+    let mut shutdown_intercept = shutdown_tx.subscribe();
+
+    let service_registry_clone = service_registry.clone();
 
     // let conn_stat_route = connection_status.clone();
     let conn_stat_discovery = connection_status.clone();
@@ -298,12 +330,149 @@ async fn connect(
 
     while let None = connection_status.read().await.forward {}
 
+    // // TODO: how to get the namespace for pmz-agnet?
+    let dns_query = Discovery::create_dns_query("pmz-agent", "default").unwrap();
+    let pmz_agent_service_ip: String;
+
+    loop {
+        let service_registry = service_registry_clone.read().await;
+        if let Ok(ip) = service_registry.get(&dns_query, 0) {
+            pmz_agent_service_ip = Ipv4Addr::from(ip.ip).to_string();
+            debug!("found IP for pmz-agent: {}", pmz_agent_service_ip);
+            break;
+        } else {
+            drop(service_registry);
+            debug!("service 'pmz-agent' not yet available in registry, retrying...");
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
+
+    let pmz_agent_service_ip_clone = pmz_agent_service_ip.clone();
+    let (intercept_tx, mut intercept_rx) = mpsc::channel::<Bytes>(1);
+
+    // dial & intercept thread
+    tokio::spawn(async move {
+        let sender = establish_h2_connection(&pmz_agent_service_ip_clone, 8101, false)
+            .await
+            .unwrap();
+        let mut send_req = sender.ready().await.unwrap();
+        let send_req_clone = send_req.clone();
+
+        // open a dial stream with agent
+        let req = Request::builder().uri("/dial").body(()).unwrap();
+
+        // send the preface
+        let (resp, mut send) = send_req.send_request(req, false).unwrap();
+        send.send_data("dial-preface-from-agent".into(), false)
+            .unwrap();
+
+        let resp = resp.await.unwrap();
+        let mut recv = resp.into_body();
+
+        // get an uuid
+        let uuid = if let Some(data) = recv.data().await {
+            let data = data.unwrap();
+            Uuid::from_slice(&data).unwrap()
+        } else {
+            // TODO need to proceed as an error case
+            Uuid::nil()
+        };
+
+        debug!("uuid is allocated from agent: {uuid:?}");
+
+        // register an intercept rule from daemon to agent
+        tokio::spawn(async move {
+            loop {
+                if let Some(mut ctx) = intercept_ctx_rx.lock().await.recv().await {
+                    ctx.id = uuid.into_bytes();
+                    let ctx = serde_json::to_vec(&ctx).unwrap();
+                    debug!("request to register an intercept rule {ctx:?}");
+                    send.send_data(ctx.into(), false).unwrap();
+                }
+            }
+        });
+
+        // receive target port from agent to initiate dialing
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(data) = recv.data() => {
+                        match data {
+                            Ok(target_port) => {
+                                if let Err(e) = intercept_tx.send(target_port).await {
+                                    error!("intercept_tx.send failed: {e:?}")
+                                }
+                            },
+                            Err(e) => error!("recv.data failed: {e:?}"),
+                        }
+                    }
+                    _ = shutdown_dial.recv() => break
+                }
+            }
+        });
+
+        async fn intercept_tunnel(
+            mut send_req: SendRequest<Bytes>,
+            id: Uuid,
+            target_port: u16,
+        ) -> Result<()> {
+            let req = Request::builder().uri("/intercept").body(()).unwrap();
+
+            let (resp, mut send) = send_req.send_request(req, false).unwrap();
+            let intercept_req = InterceptRequest {
+                id: id.into_bytes(),
+                target_port,
+            };
+            let intercept_req = serde_json::to_vec(&intercept_req)?;
+            send.send_data(intercept_req.into(), false).unwrap();
+
+            let resp = resp.await.unwrap();
+            debug!("got response: {:?}", resp);
+
+            let recv = resp.into_body();
+
+            let mut downstream = TunnelStream { recv, send };
+            let target_addr = format!("localhost:{}", target_port);
+            let mut upstream = TcpStream::connect(target_addr).await?;
+
+            tokio::io::copy_bidirectional(&mut downstream, &mut upstream)
+                .await
+                .unwrap();
+
+            Ok(())
+        }
+
+        // establish a connection with the local process using the target port
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    Some(target_port) = intercept_rx.recv() => {
+                        let target_port = {
+                            let byte_slice = target_port.as_ref();
+
+                            if byte_slice.len() != 2 {
+                                error!("target_port's slice must be 2 bytes");
+                                continue
+                            }
+
+                            u16::from_be_bytes([byte_slice[0], byte_slice[1]])
+                        };
+
+                        intercept_tunnel(send_req_clone.clone(), uuid, target_port).await.unwrap();
+                    }
+                    _ = shutdown_intercept.recv() => break
+                }
+            }
+        });
+    });
+
     let connection = Connection {
         _route: route,
         shutdown_tx,
     };
 
-    let res = connection_manager
+    let mut conn_mgr = connection_manager.lock().await;
+    let res = conn_mgr
         .connections
         .insert("default".to_string(), connection);
 
@@ -320,8 +489,8 @@ async fn disconnect(
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
     let connection = {
-        let mut connection_manager = connection_manager.lock().await;
-        connection_manager.connections.remove("default")
+        let mut conn_mgr = connection_manager.lock().await;
+        conn_mgr.connections.remove("default")
     };
 
     match connection {
@@ -335,20 +504,20 @@ async fn add_dns(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
-    let connection_manager = connection_manager.lock().await;
-    if !connection_manager.check_connection("default") {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::from(
-                "Not connected. Please run 'pmzctl connect' to establish a connection.",
-            ))?);
+    {
+        let conn_mgr = connection_manager.lock().await;
+        if !conn_mgr.check_connection("default") {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(
+                    "Not connected. Please run 'pmzctl connect' to establish a connection.",
+                ))?);
+        }
     }
 
     let body = req.collect().await?.aggregate();
     let props: serde_json::Value = serde_json::from_reader(body.reader())?;
     debug!("data: {props:?}");
-
-    let mut registry = service_registry.write().await;
 
     let mut domain_name: [u8; 256] = [0; 256];
     let domain_from_req = match props["domain"].as_str() {
@@ -416,6 +585,7 @@ async fn add_dns(
         ttl: 30,
     };
 
+    let mut registry = service_registry.write().await;
     registry.insert(dns_query, dns_recard_a, 0)?;
 
     Ok(Response::new(Full::from("dns added")))
@@ -426,20 +596,20 @@ async fn remove_dns(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
-    let connection_manager = connection_manager.lock().await;
-    if !connection_manager.check_connection("default") {
-        return Ok(Response::builder()
-            .status(StatusCode::BAD_REQUEST)
-            .body(Full::from(
-                "Not connected. Please run 'pmzctl connect' to establish a connection.",
-            ))?);
+    {
+        let conn_mgr = connection_manager.lock().await;
+        if !conn_mgr.check_connection("default") {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(
+                    "Not connected. Please run 'pmzctl connect' to establish a connection.",
+                ))?);
+        }
     }
 
     let body = req.collect().await?.aggregate();
     let props: serde_json::Value = serde_json::from_reader(body.reader())?;
     debug!("data: {props:?}");
-
-    let mut registry = service_registry.write().await;
 
     let mut domain_name: [u8; 256] = [0; 256];
     let domain_from_req = match props["domain"].as_str() {
@@ -459,6 +629,7 @@ async fn remove_dns(
         name: domain_name,
     };
 
+    let mut registry = service_registry.write().await;
     registry.remove(&dns_query)?;
 
     Ok(Response::new(Full::from("dns removed")))
@@ -468,13 +639,8 @@ async fn list_dns(
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
 ) -> Result<Response<Full<Bytes>>> {
-    let connection_manager = connection_manager.lock().await;
-    if !connection_manager.check_connection("default") {
-        return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-            Full::<Bytes>::from(
-                "Not connected. Please run 'pmzctl connect' to establish a connection.",
-            ),
-        )?);
+    if let Some(res) = check_connection(connection_manager).await? {
+        return Ok(res);
     }
 
     let registry = service_registry.read().await;
@@ -494,9 +660,13 @@ async fn list_dns(
 
 async fn start_intercept(
     req: Incoming,
-    tunnel_port: u16,
-    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    connection_manager: Arc<Mutex<ConnectionManager>>,
+    intercept_ctx_tx: Arc<Mutex<mpsc::Sender<InterceptContext>>>,
 ) -> Result<Response<Full<Bytes>>> {
+    if let Some(res) = check_connection(connection_manager).await? {
+        return Ok(res);
+    }
+
     let body = req.collect().await?.aggregate();
     let props: serde_json::Value = serde_json::from_reader(body.reader())?;
     debug!("data: {props:?}");
@@ -510,21 +680,22 @@ async fn start_intercept(
                 .body(Full::from("Please provide the service name."))?);
         }
     };
-    let dns_query = Discovery::create_dns_query(service_name, namespace)?;
 
-    let service_registry = service_registry.read().await;
-    let cluster_ip =
-        match service_registry.get(&dns_query, 0) {
-            Ok(record) => record.ip,
-            Err(_) => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-                Full::from(
-                    "Failed to get the ClusterIp with the specified service name and namespace.",
-                ),
-            )?),
-        };
+    // let dns_query = Discovery::create_dns_query(service_name, namespace)?;
+
+    // let service_registry = service_registry.read().await;
+    // let cluster_ip =
+    //     match service_registry.get(&dns_query, 0) {
+    //         Ok(record) => record.ip,
+    //         Err(_) => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+    //             Full::from(
+    //                 "Failed to get the ClusterIp with the specified service name and namespace.",
+    //             ),
+    //         )?),
+    //     };
 
     let (local_port, service_port) = match parse_ports(props["port"].as_str()) {
-        Ok((local, service)) => (local, service),
+        Ok((lo, svc)) => (lo, svc),
         Err(e) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
@@ -534,43 +705,81 @@ async fn start_intercept(
 
     debug!("local port: {local_port:?}, service port: {service_port:?}");
 
+    // ensure that the service requested to intercept traffic exists
+    let client = kube::Client::try_default().await?;
+    let services: Api<Service> = Api::namespaced(client, namespace);
+    let _ = match services.get(&service_name).await {
+        Ok(service) => {
+            if let None = service
+                .spec
+                .and_then(|s| s.ports)
+                .iter()
+                .flatten()
+                .find(|p| p.port == service_port as i32)
+            {
+                return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
+                    Full::from(format!(
+                        "Service '{service_name}' does not expose port {service_port}"
+                    )),
+                )?);
+            }
+        }
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::from(format!("Service {service_name:?} not founds")))?);
+        }
+    };
+
     if let Err(e) = is_port_in_use(local_port) {
         return Ok(Response::builder()
             .status(StatusCode::BAD_REQUEST)
             .body(Full::from(e.to_string()))?);
     }
 
-    let sender = establish_http2_connection("localhost", tunnel_port).await?;
-    let mut send_req = sender.ready().await?;
-
-    let body = IntercepRequest {
-        cluster_ip,
-        service_port,
+    let intercept_ctx = InterceptContext {
+        id: Uuid::nil().into_bytes(),
+        service_name: service_name.to_string(),
+        namespace: namespace.to_string(),
+        port: service_port,
         target_port: local_port,
     };
 
-    let body = serde_json::to_string(&body)?;
+    debug!("send intercept context: {intercept_ctx:?}");
+    intercept_ctx_tx.lock().await.send(intercept_ctx).await?;
 
-    let req = http::Request::builder()
-        .uri("/intercept")
-        .method(http::Method::POST)
-        .version(http::Version::HTTP_11)
-        .body(())?;
+    // let sender = establish_h2_connection("localhost", tunnel_port, true).await?;
+    // let mut send_req = sender.ready().await?;
 
-    let (resp, mut send) = send_req.send_request(req, false)?;
+    // let body = IntercepRequest {
+    //     cluster_ip,
+    //     service_port,
+    //     target_port: local_port,
+    // };
 
-    debug!("request body: {body:?}");
+    // let body = serde_json::to_string(&body)?;
 
-    send.send_data(Bytes::from(body), true)?;
+    // let req = http::Request::builder()
+    //     .uri("/intercept")
+    //     .method(http::Method::POST)
+    //     .version(http::Version::HTTP_11)
+    //     .body(())?;
 
-    let resp = resp.await?;
-    let (parts, mut body) = resp.into_parts();
-    let body = body.data().await.unwrap()?;
-    debug!("{:?}: {:?}", parts.status, body);
+    // let (resp, mut send) = send_req.send_request(req, false)?;
+
+    // debug!("request body: {body:?}");
+
+    // send.send_data(Bytes::from(body), true)?;
+
+    // let resp = resp.await?;
+    // let (parts, mut body) = resp.into_parts();
+    // let body = body.data().await.unwrap()?;
+    // debug!("{:?}: {:?}", parts.status, body);
 
     Ok(Response::builder()
-        .status(parts.status)
-        .body(Full::from(body))
+        // .status(parts.status)
+        // .body(Full::from(body))
+        .body(Full::from("intercept request processed successfully"))
         .unwrap())
 }
 
@@ -610,9 +819,26 @@ async fn not_found() -> Result<Response<Full<Bytes>>> {
         .body(Full::from("Not found"))?)
 }
 
-#[derive(Serialize)]
-struct IntercepRequest {
-    cluster_ip: u32,
-    service_port: u16,
-    target_port: u16,
+async fn check_connection(
+    connection_manager: Arc<Mutex<ConnectionManager>>,
+) -> Result<Option<Response<Full<Bytes>>>> {
+    let conn_mgr = connection_manager.lock().await;
+    if !conn_mgr.check_connection("default") {
+        return Ok(Some(
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .body(Full::<Bytes>::from(
+                    "Not connected. Please run 'pmzctl connect' to establish a connection.",
+                ))?,
+        ));
+    }
+
+    Ok(None)
 }
+
+// #[derive(Serialize)]
+// struct IntercepRequest {
+//     cluster_ip: u32,
+//     service_port: u16,
+//     target_port: u16,
+// }

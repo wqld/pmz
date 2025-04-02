@@ -32,7 +32,7 @@ impl TunnelClient {
     }
 
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
-        let sender = establish_http2_connection("localhost", self.tunnel_port).await?;
+        let sender = establish_h2_connection("localhost", self.tunnel_port, true).await?;
         let send_req = sender.ready().await?;
 
         loop {
@@ -115,7 +115,11 @@ impl TunnelClient {
     }
 }
 
-pub async fn establish_http2_connection(host: &str, port: u16) -> Result<SendRequest<Bytes>> {
+pub async fn establish_h2_connection(
+    host: &str,
+    port: u16,
+    use_tls: bool,
+) -> Result<SendRequest<Bytes>> {
     let tunnel_addr = format!("{}:{}", host, port);
     let stream = TcpStream::connect(tunnel_addr).await?;
     let keepalive = TcpKeepalive::new()
@@ -124,19 +128,26 @@ pub async fn establish_http2_connection(host: &str, port: u16) -> Result<SendReq
     let sock_ref = SockRef::from(&stream);
     sock_ref.set_tcp_keepalive(&keepalive)?;
 
-    let mut client_config = ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(PmzCertVerifier::new())
-        .with_no_client_auth();
-    client_config.alpn_protocols = vec![b"h2".to_vec()];
-    let tls_connector = TlsConnector::from(Arc::new(client_config));
+    let sender = if use_tls {
+        let mut client_config = ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(PmzCertVerifier::new())
+            .with_no_client_auth();
+        client_config.alpn_protocols = vec![b"h2".to_vec()];
+        let tls_connector = TlsConnector::from(Arc::new(client_config));
 
-    let tls_stream = tls_connector
-        .connect(ServerName::try_from(host.to_owned())?, stream)
-        .await?;
+        let tls_stream = tls_connector
+            .connect(ServerName::try_from(host.to_owned())?, stream)
+            .await?;
 
-    let (sender, conn) = h2::client::handshake(tls_stream).await?;
-    tokio::spawn(conn);
+        let (sender, conn) = h2::client::handshake(tls_stream).await?;
+        tokio::spawn(conn);
+        sender
+    } else {
+        let (sender, conn) = h2::client::handshake(stream).await?;
+        tokio::spawn(conn);
+        sender
+    };
 
     Ok(sender)
 }
