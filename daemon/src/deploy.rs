@@ -1,13 +1,14 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use k8s_openapi::api::{
     apps::v1::Deployment,
-    core::v1::{Pod, Secret},
+    core::v1::{Pod, Secret, Service, ServiceAccount},
+    rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
 };
 use kube::{
-    api::{DeleteParams, ListParams, Patch, PatchParams},
     Api, Client, Resource, ResourceExt,
+    api::{DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
 };
-use rcgen::{generate_simple_self_signed, CertifiedKey};
+use rcgen::{CertifiedKey, generate_simple_self_signed};
 use serde_json::json;
 
 static TLS_SECRET_NAME: &str = "pmz-tls";
@@ -66,7 +67,6 @@ impl<'a> Deploy<'a> {
 
     pub async fn deploy_agent(&self) -> Result<()> {
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), self.namespace);
-
         let ss_apply = PatchParams::apply("pmz");
         let pmz_agent: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
@@ -92,6 +92,7 @@ impl<'a> Deploy<'a> {
                         }
                     },
                     "spec": {
+                        "serviceAccountName": "pmz-agent",
                         "hostNetwork": true,
                         "containers": [{
                             "name": AGENT_APP_NAME,
@@ -137,15 +138,134 @@ impl<'a> Deploy<'a> {
         Ok(())
     }
 
-    pub async fn clean_resources(&self) -> Result<()> {
-        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), self.namespace);
-        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), self.namespace);
+    pub async fn expose_agent(&self) -> Result<()> {
+        let services: Api<Service> = Api::namespaced(self.client.clone(), self.namespace);
+        let ss_apply = PatchParams::apply("pmz");
+        let pmz_service: Service = serde_json::from_value(json!( {
+            "apiVersion": "v1",
+            "kind": "Service",
+            "metadata": {
+                "name": AGENT_APP_NAME,
+                "namespace": self.namespace,
+                "labels": {
+                    "app": AGENT_APP_NAME
+                }
 
+            },
+            "spec": {
+                "selector": {
+                    "app": AGENT_APP_NAME
+                },
+                "ports": [{
+                    "protocol": "TCP",
+                    "port": 8101
+                }]
+            }
+
+        }))?;
+
+        services
+            .patch(AGENT_APP_NAME, &ss_apply, &Patch::Apply(pmz_service))
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn add_rback_to_agent(&self) -> Result<()> {
+        let service_accounts: Api<ServiceAccount> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());
+        let clsuter_role_bindings: Api<ClusterRoleBinding> = Api::all(self.client.clone());
+        let ss_apply = PatchParams::apply("pmz");
+
+        let pmz_service_account = ServiceAccount {
+            metadata: ObjectMeta {
+                name: Some(AGENT_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pmz_cluster_role = ClusterRole {
+            aggregation_rule: None,
+            metadata: ObjectMeta {
+                name: Some(AGENT_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            rules: Some({
+                vec![PolicyRule {
+                    api_groups: Some(vec!["".to_owned()]),
+                    resources: Some(vec!["services".to_owned()]),
+                    verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
+                    ..Default::default()
+                }]
+            }),
+        };
+
+        let pmz_cluster_role_binding = ClusterRoleBinding {
+            metadata: ObjectMeta {
+                name: Some(AGENT_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: "rbac.authorization.k8s.io".to_owned(),
+                kind: "ClusterRole".to_owned(),
+                name: AGENT_APP_NAME.to_owned(),
+            },
+            subjects: Some(vec![Subject {
+                kind: "ServiceAccount".to_owned(),
+                name: AGENT_APP_NAME.to_owned(),
+                namespace: Some(self.namespace.to_owned()),
+                ..Default::default()
+            }]),
+        };
+
+        service_accounts
+            .patch(
+                AGENT_APP_NAME,
+                &ss_apply,
+                &Patch::Apply(pmz_service_account),
+            )
+            .await?;
+        cluster_roles
+            .patch(AGENT_APP_NAME, &ss_apply, &Patch::Apply(pmz_cluster_role))
+            .await?;
+        clsuter_role_bindings
+            .patch(
+                AGENT_APP_NAME,
+                &ss_apply,
+                &Patch::Apply(pmz_cluster_role_binding),
+            )
+            .await?;
+
+        Ok(())
+    }
+
+    pub async fn clean_resources(&self) -> Result<()> {
+        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), self.namespace);
+        let services: Api<Service> = Api::namespaced(self.client.clone(), self.namespace);
+        let secrets: Api<Secret> = Api::namespaced(self.client.clone(), self.namespace);
+        let clsuter_role_bindings: Api<ClusterRoleBinding> = Api::all(self.client.clone());
+        let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());
+        let service_accounts: Api<ServiceAccount> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+
+        deployments
+            .delete(AGENT_APP_NAME, &DeleteParams::default())
+            .await?;
+        services
+            .delete(AGENT_APP_NAME, &DeleteParams::default())
+            .await?;
         secrets
             .delete(TLS_SECRET_NAME, &DeleteParams::default())
             .await?;
-
-        deployments
+        clsuter_role_bindings
+            .delete(AGENT_APP_NAME, &DeleteParams::default())
+            .await?;
+        cluster_roles
+            .delete(AGENT_APP_NAME, &DeleteParams::default())
+            .await?;
+        service_accounts
             .delete(AGENT_APP_NAME, &DeleteParams::default())
             .await?;
 

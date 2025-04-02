@@ -102,7 +102,7 @@ impl Proxy {
         let nat_key = SockPair {
             src_addr: u32::to_be(peer_ip),
             src_port: u16::to_be(peer_addr.port()),
-            dst_addr: u32::to_be(2130706433),
+            dst_addr: u32::to_be(2130706433), // 127.0.0.1
             dst_port: u16::to_be(proxy_port),
         };
 
@@ -113,17 +113,11 @@ impl Proxy {
 
         let nat_table = self.nat_table.read().await;
         let nat_origin = nat_table.get(&nat_key, 0)?;
+        let target_ip = Ipv4Addr::from_bits(u32::from_be(nat_origin.addr));
+        let target_port = u16::from_be(nat_origin.port);
 
-        debug!(
-            "NatOrigin found: {:?}:{}",
-            Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
-            u16::from_be(nat_origin.port)
-        );
+        debug!("NatOrigin found: {:?}:{}", target_ip, target_port);
 
-        Ok(format!(
-            "{}:{}",
-            Ipv4Addr::from_bits(u32::from_be(nat_origin.addr)),
-            u16::from_be(nat_origin.port)
-        ))
+        Ok(format!("{}:{}", target_ip, target_port))
     }
 }
