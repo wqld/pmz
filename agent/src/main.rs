@@ -49,6 +49,10 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .unwrap();
+
     let dial_map: HashMap<Uuid, mpsc::Sender<DialRequest>> = HashMap::new();
     let dial_map = Arc::new(Mutex::new(dial_map));
     let dial_map_for_gate = dial_map.clone();
@@ -210,10 +214,6 @@ async fn main() -> Result<()> {
             }
         }
     });
-
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .unwrap();
 
     // intercept gate thread
     tokio::spawn(async move {

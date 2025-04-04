@@ -18,3 +18,6 @@ alias patg := publish-agent-to-ghrc
 
 @package-daemon:
     @# TODO
+
+@install-crd:
+    cargo run -p agent --bin crdgen | kubectl apply -f -
