@@ -125,8 +125,11 @@ async fn update_cni_conflist(conflist_path: &Path) -> Result<()> {
 
         let updated_content = serde_json::to_vec_pretty(&root_value)?;
         let temp_name = format!(
-            "{:?}.tmp.{}",
-            conflist_path.file_name().unwrap_or_default(),
+            "{}.tmp.{}",
+            conflist_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy(),
             std::process::id()
         );
         let temp_path = conflist_path.with_file_name(temp_name);
