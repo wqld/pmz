@@ -86,12 +86,12 @@ impl<'a> Deploy<'a> {
             },
             spec: Some(DaemonSetSpec {
                 selector: LabelSelector {
-                    match_labels: Some(Self::kv_to_map("name", "pmz-cni")),
+                    match_labels: Some(Self::kv_to_map("name", CNI_APP_NAME)),
                     ..Default::default()
                 },
                 template: PodTemplateSpec {
                     metadata: Some(ObjectMeta {
-                        labels: Some(Self::kv_to_map("name", "pmz-cni")),
+                        labels: Some(Self::kv_to_map("name", CNI_APP_NAME)),
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
@@ -292,7 +292,7 @@ impl<'a> Deploy<'a> {
         Ok(())
     }
 
-    pub async fn add_rback_to_agent(&self) -> Result<()> {
+    pub async fn add_rbac_to_agent(&self) -> Result<()> {
         let service_accounts: Api<ServiceAccount> =
             Api::namespaced(self.client.clone(), &self.namespace);
         let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());

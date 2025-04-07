@@ -196,7 +196,7 @@ async fn deploy_agent(req: Incoming) -> Result<Response<Full<Bytes>>> {
 
     deploy.deploy_cni().await?;
     deploy.deploy_tls_secret().await?;
-    deploy.add_rback_to_agent().await?;
+    deploy.add_rbac_to_agent().await?;
     deploy.deploy_agent().await?;
     deploy.expose_agent().await?;
 
