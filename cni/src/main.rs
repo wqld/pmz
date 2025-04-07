@@ -58,8 +58,7 @@ async fn main() -> Result<()> {
     }
 
     let listener = UnixListener::bind(unix_sock_path)?;
-    tokio::fs::set_permissions(unix_sock_path, std::fs::Permissions::from_mode(0o766)).await?;
-
+    tokio::fs::set_permissions(unix_sock_path, std::fs::Permissions::from_mode(0o700)).await?;
     loop {
         let (stream, _) = listener.accept().await?;
 
