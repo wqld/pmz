@@ -86,12 +86,12 @@ impl<'a> Deploy<'a> {
             },
             spec: Some(DaemonSetSpec {
                 selector: LabelSelector {
-                    match_labels: Some(Self::kv_to_map("name", CNI_APP_NAME)),
+                    match_labels: Some(Self::build_label_map("name", CNI_APP_NAME)),
                     ..Default::default()
                 },
                 template: PodTemplateSpec {
                     metadata: Some(ObjectMeta {
-                        labels: Some(Self::kv_to_map("name", CNI_APP_NAME)),
+                        labels: Some(Self::build_label_map("name", CNI_APP_NAME)),
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
@@ -404,7 +404,7 @@ impl<'a> Deploy<'a> {
         Ok((cert.pem(), key_pair.serialize_pem()))
     }
 
-    fn kv_to_map(key: &str, value: &str) -> BTreeMap<String, String> {
+    fn build_label_map(key: &str, value: &str) -> BTreeMap<String, String> {
         [(key, value)]
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))

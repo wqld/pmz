@@ -2,6 +2,7 @@ use std::io::Write;
 
 use anyhow::Result;
 use log::debug;
+use tokio::io::AsyncReadExt;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,11 +34,12 @@ async fn main() -> Result<()> {
         "ADD" => {
             let netns = std::env::var("CNI_NETNS")?;
             let netdev = std::env::var("CNI_IFNAME")?;
-            let stdin = std::io::read_to_string(std::io::stdin())?;
-            debug!("(ADD) netns {netns:?}, netdev {netdev:?}");
-            debug!("stdin: {stdin:?}");
+            let mut buf = String::new();
+            tokio::io::stdin().read_to_string(&mut buf).await?;
 
-            let config: serde_json::Value = serde_json::from_str(&stdin)?;
+            debug!("(ADD) netns {netns:?}, netdev {netdev:?}: {buf:?}");
+
+            let config: serde_json::Value = serde_json::from_str(&buf)?;
             let prev_result = config.get("prevResult").unwrap();
             let output = serde_json::to_string(prev_result)?;
             println!("{}", output);
