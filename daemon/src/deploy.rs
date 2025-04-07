@@ -1,8 +1,16 @@
+use std::collections::BTreeMap;
+
 use anyhow::{Result, bail};
-use k8s_openapi::api::{
-    apps::v1::Deployment,
-    core::v1::{Pod, Secret, Service, ServiceAccount},
-    rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
+use k8s_openapi::{
+    api::{
+        apps::v1::{DaemonSet, DaemonSetSpec, Deployment},
+        core::v1::{
+            Capabilities, Container, HostPathVolumeSource, Pod, PodSpec, PodTemplateSpec, Secret,
+            SecurityContext, Service, ServiceAccount, Volume, VolumeMount,
+        },
+        rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
+    },
+    apimachinery::pkg::apis::meta::v1::LabelSelector,
 };
 use kube::{
     Api, Client, Resource, ResourceExt,
@@ -13,6 +21,7 @@ use serde_json::json;
 
 static TLS_SECRET_NAME: &str = "pmz-tls";
 static AGENT_APP_NAME: &str = "pmz-agent";
+static CNI_APP_NAME: &str = "pmz-cni";
 
 pub struct Deploy<'a> {
     client: kube::Client,
@@ -65,8 +74,120 @@ impl<'a> Deploy<'a> {
         Ok(())
     }
 
+    pub async fn deploy_cni(&self) -> Result<()> {
+        let daemon_sets: Api<DaemonSet> = Api::namespaced(self.client.clone(), &self.namespace);
+        let ss_apply = PatchParams::apply("pmz");
+
+        let pmz_cni: DaemonSet = DaemonSet {
+            metadata: ObjectMeta {
+                name: Some(CNI_APP_NAME.to_string()),
+                namespace: Some(self.namespace.to_string()),
+                ..Default::default()
+            },
+            spec: Some(DaemonSetSpec {
+                selector: LabelSelector {
+                    match_labels: Some(Self::build_label_map("name", CNI_APP_NAME)),
+                    ..Default::default()
+                },
+                template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(Self::build_label_map("name", CNI_APP_NAME)),
+                        ..Default::default()
+                    }),
+                    spec: Some(PodSpec {
+                        host_network: Some(true),
+                        volumes: Some(vec![
+                            Volume {
+                                name: "cni-bin".to_string(),
+                                host_path: Some(HostPathVolumeSource {
+                                    path: "/opt/cni/bin".to_string(),
+                                    type_: Some("DirectoryOrCreate".to_string()),
+                                }),
+                                ..Default::default()
+                            },
+                            Volume {
+                                name: "cni-cfg".to_string(),
+                                host_path: Some(HostPathVolumeSource {
+                                    path: "/etc/cni/net.d".to_string(),
+                                    type_: Some("DirectoryOrCreate".to_string()),
+                                }),
+                                ..Default::default()
+                            },
+                            Volume {
+                                name: "pmz-dir".to_string(),
+                                host_path: Some(HostPathVolumeSource {
+                                    path: "/var/run/pmz".to_string(),
+                                    type_: Some("DirectoryOrCreate".to_string()),
+                                }),
+                                ..Default::default()
+                            },
+                        ]),
+                        init_containers: Some(vec![Container {
+                            name: "install-cni".to_string(),
+                            image: Some("ghcr.io/wqld/pmz-cni:0.1.0".to_string()),
+                            image_pull_policy: Some("IfNotPresent".to_string()),
+                            command: Some(vec![
+                                "sh".to_string(),
+                                "-c".to_string(),
+                                "chmod +x /app/pmz-cni-plugin && cp /app/pmz-cni-plugin /cni/pmz-cni".to_string(),
+                            ]),
+                            volume_mounts: Some(vec![
+                                VolumeMount {
+                                    name: "cni-bin".to_string(),
+                                    mount_path: "/cni".to_string(),
+                                    ..Default::default()
+                                },
+                                VolumeMount {
+                                    name: "pmz-dir".to_string(),
+                                    mount_path: "/var/run/pmz".to_string(),
+                                    ..Default::default()
+                                }
+                            ]),
+                            ..Default::default()
+                        }]),
+                        containers: vec![Container {
+                            name: "pmz-cni".to_string(),
+                            image: Some("ghcr.io/wqld/pmz-cni:0.1.0".to_string()),
+                            image_pull_policy: Some("IfNotPresent".to_string()),
+                            volume_mounts: Some(vec![
+                                VolumeMount {
+                                    name: "cni-cfg".to_string(),
+                                    mount_path: "/etc/cni/net.d".to_string(),
+                                    ..Default::default()
+                                },
+                                VolumeMount {
+                                    name: "pmz-dir".to_string(),
+                                    mount_path: "/var/run/pmz".to_string(),
+                                    ..Default::default()
+                                }
+                            ]),
+                            security_context: Some(SecurityContext {
+                                privileged: Some(true),
+                                capabilities: Some(Capabilities {
+                                    add: Some(vec!["NET_RAW".to_string(), "NET_ADMIN".to_string()]),
+                                    drop: None,
+                                }),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        daemon_sets
+            .patch(CNI_APP_NAME, &ss_apply, &Patch::Apply(pmz_cni))
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn deploy_agent(&self) -> Result<()> {
-        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), self.namespace);
+        let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), &self.namespace);
         let ss_apply = PatchParams::apply("pmz");
         let pmz_agent: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
@@ -171,7 +292,7 @@ impl<'a> Deploy<'a> {
         Ok(())
     }
 
-    pub async fn add_rback_to_agent(&self) -> Result<()> {
+    pub async fn add_rbac_to_agent(&self) -> Result<()> {
         let service_accounts: Api<ServiceAccount> =
             Api::namespaced(self.client.clone(), &self.namespace);
         let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());
@@ -249,6 +370,7 @@ impl<'a> Deploy<'a> {
         let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());
         let service_accounts: Api<ServiceAccount> =
             Api::namespaced(self.client.clone(), &self.namespace);
+        let daemon_sets: Api<DaemonSet> = Api::namespaced(self.client.clone(), &self.namespace);
 
         deployments
             .delete(AGENT_APP_NAME, &DeleteParams::default())
@@ -268,6 +390,9 @@ impl<'a> Deploy<'a> {
         service_accounts
             .delete(AGENT_APP_NAME, &DeleteParams::default())
             .await?;
+        daemon_sets
+            .delete(CNI_APP_NAME, &DeleteParams::default())
+            .await?;
 
         Ok(())
     }
@@ -277,5 +402,12 @@ impl<'a> Deploy<'a> {
             generate_simple_self_signed(vec!["localhost".to_string()])?;
 
         Ok((cert.pem(), key_pair.serialize_pem()))
+    }
+
+    fn build_label_map(key: &str, value: &str) -> BTreeMap<String, String> {
+        [(key, value)]
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 }

@@ -1,0 +1,26 @@
+[package]
+name = "cni"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "cni-plugin"
+path = "src/plugin/main.rs"
+
+[dependencies]
+anyhow = { workspace = true, default-features = true }
+env_logger = { workspace = true }
+libc = { workspace = true }
+log = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-std", "fs"] }
+clap = { workspace = true, features = ["derive"] }
+
+chrono = "0.4"
+http-body-util = "0.1.2"
+hyper = { version = "1.5.2", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3"

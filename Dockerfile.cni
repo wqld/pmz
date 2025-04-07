@@ -1,0 +1,31 @@
+FROM --platform=$BUILDPLATFORM rust:1 AS builder
+
+# export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+# export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+# cargo build --release --target aarch64-unknown-linux-musl -p cni
+# cargo build --release --target x86_64-unknown-linux-musl -p cni
+# docker build --push --platform linux/amd64,linux/arm64 -t ghcr.io/wqld/pmz-cni:0.1.0 .
+
+ARG TARGETPLATFORM
+ARG BUILDPLATFORM
+RUN echo "I am running on $BUILDPLATFORM, building for $TARGETPLATFORM"
+RUN case "$TARGETPLATFORM" in \
+    "linux/arm64") echo aarch64-unknown-linux-musl > /rust_target.txt ;; \
+    "linux/amd64") echo x86_64-unknown-linux-musl > /rust_target.txt ;; \
+    *) exit 1 ;; \
+    esac
+
+COPY . .
+
+RUN cp target/$(cat /rust_target.txt)/release/cni target/pmz-cni
+RUN cp target/$(cat /rust_target.txt)/release/cni-plugin target/pmz-cni-plugin
+
+FROM alpine:3.18 AS runtime
+
+COPY --from=builder --chown=root:root /target/pmz-cni /app/
+COPY --from=builder --chown=root:root /target/pmz-cni-plugin /app/
+
+ENV RUST_LOG=info
+EXPOSE 8080
+
+CMD ["/app/pmz-cni"]
