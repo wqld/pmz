@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{collections::HashMap, io::Write};
 
 use anyhow::Result;
 use log::debug;
@@ -34,10 +34,16 @@ async fn main() -> Result<()> {
         "ADD" => {
             let netns = std::env::var("CNI_NETNS")?;
             let netdev = std::env::var("CNI_IFNAME")?;
+            let cni_args_str = std::env::var("CNI_ARGS").unwrap_or_default();
+            let cni_args_map = parse_cni_args(&cni_args_str);
+
+            let namespace = cni_args_map.get("K8S_POD_NAMESPACE");
+            let pod_name = cni_args_map.get("K8S_POD_NAME");
+
             let mut buf = String::new();
             tokio::io::stdin().read_to_string(&mut buf).await?;
 
-            debug!("(ADD) netns {netns:?}, netdev {netdev:?}: {buf:?}");
+            debug!("{namespace:?}/{pod_name:?} (ADD) netns {netns:?}, netdev {netdev:?}: {buf:?}");
 
             let config: serde_json::Value = serde_json::from_str(&buf)?;
             let prev_result = config.get("prevResult").unwrap();
@@ -48,4 +54,21 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn parse_cni_args(cni_args: &str) -> HashMap<String, String> {
+    cni_args
+        .split(';')
+        .filter(|s| !s.is_empty())
+        .filter_map(|arg_pair| {
+            let mut parts = arg_pair.splitn(2, '=');
+
+            match (parts.next(), parts.next()) {
+                (Some(key), Some(value)) => {
+                    Some((key.trim().to_string(), value.trim().to_string()))
+                }
+                _ => None,
+            }
+        })
+        .collect()
 }
