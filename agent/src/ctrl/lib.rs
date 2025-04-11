@@ -11,7 +11,7 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     kind = "InterceptRule",
-    group = "pmz.sinabro",
+    group = "pmz.sinabro.io",
     version = "v1alpha1",
     shortname = "irs",
     namespaced
@@ -20,8 +20,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 pub struct InterceptRuleSpec {
     pub service: String,
     pub port: u16,
-    pub target_port: u16,
-    pub id: uuid::Bytes,
+    #[serde(rename = "localPort")]
+    pub local_port: u16,
+    pub id: String,
 }
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
