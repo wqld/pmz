@@ -8,11 +8,13 @@ use clap::Parser;
 
 use ::proxy::tunnel;
 use ::proxy::tunnel::server::TunnelServer;
+use discovery::DiscoveryServer;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::runtime::{WatchStreamExt, watcher};
 use kube::{Api, ResourceExt};
 use log::{debug, error};
+use proto::intercept_discovery_server::InterceptDiscoveryServer;
 use proxy::{
     DialRequest, InterceptRouteKey, InterceptRouteMap, InterceptRuleKey, InterceptRuleMap,
     InterceptValue,
@@ -20,8 +22,10 @@ use proxy::{
 use server::InterceptTunnel;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc};
+use tonic::transport;
 use uuid::Uuid;
 
+mod discovery;
 mod server;
 
 #[derive(Parser, Debug)]
@@ -52,6 +56,24 @@ async fn main() -> Result<()> {
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
+
+    let subs = HashMap::new();
+    let subs = Arc::new(RwLock::new(subs));
+    let subs_clone = subs.clone();
+
+    // discovery thread
+    tokio::spawn(async move {
+        debug!("Discovery!");
+        let addr = SocketAddr::from(([0, 0, 0, 0], 50018));
+        let discovery_server = DiscoveryServer::new(subs_clone);
+        debug!("Discovery server is starting with {addr:?}");
+
+        transport::Server::builder()
+            .add_service(InterceptDiscoveryServer::new(discovery_server))
+            .serve(addr)
+            .await
+            .unwrap()
+    });
 
     let dial_map: HashMap<Uuid, mpsc::Sender<DialRequest>> = HashMap::new();
     let dial_map = Arc::new(Mutex::new(dial_map));
@@ -107,7 +129,7 @@ async fn main() -> Result<()> {
                 };
                 debug!("intercept route key: {rkey:?}, value: {rvalue:?}");
 
-                // TODO: Remove route map. EBPF redirection is not feasible;
+                // TODO: Remove route map. eBPF redirection is not feasible;
                 // use CRD for intercept rules, enabling CNI handling
                 intercept_rule_map.write().await.insert(key, value);
                 intercept_route_map.write().await.insert(rkey, rvalue);
@@ -115,6 +137,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    // TODO Deprecated: we don't need to this anymore.
     // service watcher
     tokio::spawn(async move {
         let client = kube::Client::try_default().await.unwrap();

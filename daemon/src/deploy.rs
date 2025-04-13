@@ -5,8 +5,9 @@ use k8s_openapi::{
     api::{
         apps::v1::{DaemonSet, DaemonSetSpec, Deployment},
         core::v1::{
-            Capabilities, Container, HostPathVolumeSource, Pod, PodSpec, PodTemplateSpec, Secret,
-            SecurityContext, Service, ServiceAccount, Volume, VolumeMount,
+            Capabilities, Container, EnvVar, EnvVarSource, HostPathVolumeSource,
+            ObjectFieldSelector, Pod, PodSpec, PodTemplateSpec, Secret, SecurityContext, Service,
+            ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount,
         },
         rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
     },
@@ -96,6 +97,7 @@ impl<'a> Deploy<'a> {
                     }),
                     spec: Some(PodSpec {
                         host_network: Some(true),
+                        dns_policy: Some("ClusterFirstWithHostNet".to_string()),
                         volumes: Some(vec![
                             Volume {
                                 name: "cni-bin".to_string(),
@@ -149,6 +151,35 @@ impl<'a> Deploy<'a> {
                             name: "pmz-cni".to_string(),
                             image: Some("ghcr.io/wqld/pmz-cni:0.1.0".to_string()),
                             image_pull_policy: Some("IfNotPresent".to_string()),
+                            env: Some(vec![
+                                EnvVar {
+                                    name: "CNI_NAMESPACE".to_string(),
+                                    value: None,
+                                    value_from: Some(EnvVarSource {
+                                        field_ref: Some(ObjectFieldSelector {
+                                            api_version: None,
+                                            field_path: "metadata.namespace".to_string()
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                },
+                                EnvVar {
+                                    name: "HOST_IP".to_string(),
+                                    value: None,
+                                    value_from: Some(EnvVarSource {
+                                        field_ref: Some(ObjectFieldSelector {
+                                            api_version: None,
+                                            field_path: "status.hostIP".to_string()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                },
+                                EnvVar {
+                                    name: "RUST_LOG".to_string(),
+                                    value: Some("debug".to_string()),
+                                    ..Default::default()
+                                }
+                            ]),
                             volume_mounts: Some(vec![
                                 VolumeMount {
                                     name: "cni-cfg".to_string(),
@@ -262,28 +293,33 @@ impl<'a> Deploy<'a> {
     pub async fn expose_agent(&self) -> Result<()> {
         let services: Api<Service> = Api::namespaced(self.client.clone(), self.namespace);
         let ss_apply = PatchParams::apply("pmz");
-        let pmz_service: Service = serde_json::from_value(json!( {
-            "apiVersion": "v1",
-            "kind": "Service",
-            "metadata": {
-                "name": AGENT_APP_NAME,
-                "namespace": self.namespace,
-                "labels": {
-                    "app": AGENT_APP_NAME
-                }
-
+        let pmz_service = Service {
+            metadata: ObjectMeta {
+                name: Some(AGENT_APP_NAME.to_string()),
+                namespace: Some(self.namespace.to_string()),
+                labels: Some(Self::build_label_map("app", AGENT_APP_NAME)),
+                ..Default::default()
             },
-            "spec": {
-                "selector": {
-                    "app": AGENT_APP_NAME
-                },
-                "ports": [{
-                    "protocol": "TCP",
-                    "port": 8101
-                }]
-            }
-
-        }))?;
+            spec: Some(ServiceSpec {
+                selector: Some(Self::build_label_map("app", AGENT_APP_NAME)),
+                ports: Some(vec![
+                    ServicePort {
+                        name: Some("reverse".to_string()),
+                        protocol: Some("TCP".to_string()),
+                        port: 8101,
+                        ..Default::default()
+                    },
+                    ServicePort {
+                        name: Some("grpc".to_string()),
+                        protocol: Some("TCP".to_string()),
+                        port: 50018,
+                        ..Default::default()
+                    },
+                ]),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
 
         services
             .patch(AGENT_APP_NAME, &ss_apply, &Patch::Apply(pmz_service))

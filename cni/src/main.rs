@@ -2,9 +2,10 @@ use std::{
     ffi::OsStr,
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
+    time::Duration,
 };
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use clap::Parser;
 use http_body_util::Full;
 use hyper::{
@@ -14,9 +15,14 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use log::{debug, error};
+use log::{debug, error, info, warn};
+use proto::{DiscoveryRequest, intercept_discovery_client::InterceptDiscoveryClient};
 use serde::{Deserialize, Serialize};
-use tokio::net::UnixListener;
+use tokio::{net::UnixListener, time::sleep};
+use tokio_stream::StreamExt;
+use tonic::transport;
+
+mod discovery;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -41,6 +47,74 @@ async fn main() -> Result<()> {
     env_logger::init();
 
     let args = Args::parse();
+    let namespace = std::env::var("CNI_NAMESPACE")?;
+    let host_ip = std::env::var("HOST_IP")?;
+
+    // discovery thread
+    tokio::spawn(async move {
+        const MAX_RETRIES: u32 = 5;
+        const INITIAL_DELAY_MS: u64 = 500;
+
+        let url = format!("http://pmz-agent.{}.svc:50018", namespace);
+        debug!("Discovery: {namespace}, {host_ip}, {url}");
+
+        let mut client = None;
+
+        for attempt in 0..MAX_RETRIES {
+            let endpoint = match transport::Endpoint::from_shared(url.clone()) {
+                Ok(ep) => ep,
+                Err(e) => {
+                    error!(
+                        "Failed to create endpoint ({}/{MAX_RETRIES}): {e:?}",
+                        attempt + 1,
+                    );
+                    bail!("Invalid URL format for endpoint: {}", e);
+                }
+            };
+
+            match endpoint.connect().await {
+                Ok(ch) => {
+                    info!("Successfully connected to discovery server");
+                    client = Some(InterceptDiscoveryClient::new(ch));
+                }
+                Err(e) => {
+                    error!("Connection failed ({}/{MAX_RETRIES}): {e:?}", attempt + 1);
+
+                    if attempt == MAX_RETRIES - 1 {
+                        error!("Failed to connect after all retries");
+                        bail!("Failed to connect after {MAX_RETRIES} attemps: {e:?}");
+                    }
+
+                    let delay_ms = INITIAL_DELAY_MS * 2_u64.pow(attempt);
+                    warn!(
+                        "Retrying connection after {delay_ms} ({}/{MAX_RETRIES})",
+                        attempt + 1
+                    );
+                    sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+
+        let mut client = match client {
+            Some(c) => c,
+            None => bail!("Client could not be initialized after retries (logic error?)"),
+        };
+
+        info!("Requesting intercepts stream");
+
+        let mut stream = client
+            .intercepts(DiscoveryRequest { node_ip: host_ip })
+            .await?
+            .into_inner();
+
+        debug!("Discovery: streaming started..");
+
+        while let Some(resp) = stream.next().await {
+            debug!("received: {resp:?}");
+        }
+
+        Ok(())
+    });
 
     // update the existing CNI configuration to enable the invocation of pmz-cni via chaining
     let dir_path = Path::new(&args.cni_conf_dir);

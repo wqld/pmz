@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+package intercept;
+
+service InterceptDiscovery {
+  rpc Intercepts(DiscoveryRequest) returns (stream DiscoveryResponse) {}
+}
+
+message DiscoveryRequest {
+  string node_ip = 1;
+}
+
+message DiscoveryResponse {
+  string version_info = 1;
+  repeated InterceptEndpoint resources = 2;
+}
+
+message InterceptEndpoint {
+  repeated PodIdentifier pod_ids = 1;
+  string namespace = 2;
+  string target_port = 3;
+}
+
+message PodIdentifier {
+  string name = 1;
+  string ip = 2;
+  string host_ip = 3;
+}
+

@@ -8,7 +8,10 @@ use k8s_openapi::{
 use kube::{
     Api, Client, Resource, ResourceExt,
     api::{ListParams, Patch, PatchParams},
-    runtime::controller::{Action, Controller},
+    runtime::{
+        controller::{Action, Controller},
+        watcher,
+    },
 };
 use log::{debug, error, info, warn};
 use serde_json::json;
@@ -19,9 +22,17 @@ struct State {
     client: Client,
 }
 
+#[derive(Debug)]
+pub struct PodIdentifier {
+    pub name: String,
+    pub ip: String,
+    pub host_ip: String,
+}
+
 #[derive(Default, Debug)]
-pub struct ServiceEndpoint {
-    pub pod_ips: Vec<String>,
+pub struct InterceptEndpoint {
+    pub pod_ids: Vec<PodIdentifier>,
+    pub namespace: String,
     pub target_port: Option<i32>,
 }
 
@@ -40,8 +51,7 @@ async fn main() -> Result<(), kube::Error> {
         client: client.clone(),
     };
 
-    Controller::new(intercept_rules, Default::default())
-        // TODO .watches(endpoint_slices, Default::default(), mapper)
+    Controller::new(intercept_rules, watcher::Config::default())
         .run(reconcile, error_policy, Arc::new(state))
         .for_each(|_| futures::future::ready(()))
         .await;
@@ -99,22 +109,23 @@ async fn reconcile(obj: Arc<InterceptRule>, ctx: Arc<State>) -> Result<Action> {
                 .and_then(|ports| ports.iter().find(|&p| p.port == *port as i32))
                 .and_then(|port| port.target_port.clone());
 
-            let service_endpoint = match target_port {
+            let intercept_endpoint = match target_port {
                 Some(target_port) => {
                     debug!("Found targetPort: {target_port:?} for Service port {port}");
 
-                    resolve_service_endpoint(&ctx, &namespace, &service, &target_port).await
+                    resolve_intercept_endpoint(&ctx, &namespace, &service, &target_port).await
                 }
                 None => {
                     warn!(
                         "Could not find targetPort mapping for Service port {port} in Service '{service_name}'"
                     );
-                    Ok(ServiceEndpoint::default())
+                    Ok(InterceptEndpoint::default())
                 }
             };
 
             // TODO send endpoints to cni
-            debug!("service endpoint: {service_endpoint:?}");
+            // need to check if target port is not None
+            debug!("intercept endpoint: {intercept_endpoint:?}");
         }
         Err(e) => {
             error!(
@@ -174,19 +185,19 @@ async fn update_owner_reference(
     }
 }
 
-async fn resolve_service_endpoint(
+async fn resolve_intercept_endpoint(
     ctx: &Arc<State>,
-    ns: &str,
+    namespace: &str,
     svc: &Service,
     target_port: &IntOrString,
-) -> Result<ServiceEndpoint> {
+) -> Result<InterceptEndpoint> {
     if let Some(selector) = svc.spec.as_ref().and_then(|spec| spec.selector.as_ref()) {
         let label_selector = selector
             .iter()
             .map(|(k, v)| format!("{}={}", k, v))
             .collect::<Vec<_>>()
             .join(",");
-        let pods = Api::<Pod>::namespaced(ctx.client.clone(), &ns);
+        let pods = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
         let list_params = ListParams::default().labels(&label_selector);
 
         match pods.list(&list_params).await {
@@ -198,14 +209,30 @@ async fn resolve_service_endpoint(
                         .find_map(|pod| find_named_port_in_pod(pod, &np)),
                 };
 
-                let pod_ips: Vec<String> = pod_list
+                let pod_ids: Vec<PodIdentifier> = pod_list
                     .iter()
-                    .filter_map(|pod| pod.status.as_ref())
-                    .filter_map(|status| status.pod_ip.clone())
+                    .filter_map(|pod| {
+                        let name = pod.name_any();
+                        let status = pod.status.as_ref();
+
+                        let pod_ip = status.and_then(|s| s.pod_ip.as_ref());
+                        let host_ip = status.and_then(|s| s.host_ip.as_ref());
+
+                        if let (Some(pod_ip), Some(host_ip)) = (pod_ip, host_ip) {
+                            Some(PodIdentifier {
+                                name,
+                                ip: pod_ip.clone(),
+                                host_ip: host_ip.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
 
-                return Ok(ServiceEndpoint {
-                    pod_ips,
+                return Ok(InterceptEndpoint {
+                    pod_ids,
+                    namespace: namespace.to_owned(),
                     target_port,
                 });
             }
@@ -213,7 +240,7 @@ async fn resolve_service_endpoint(
         }
     }
 
-    Ok(ServiceEndpoint::default())
+    Ok(InterceptEndpoint::default())
 }
 
 fn find_named_port_in_pod(pod: &Pod, named_port: &str) -> Option<i32> {
