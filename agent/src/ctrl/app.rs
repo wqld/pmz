@@ -1,9 +1,11 @@
-use ctrl::{Error, InterceptRule, Result};
+use anyhow::{Context, anyhow, bail};
+use ctrl::{Error, InterceptRule, InterceptRuleStatus, Result};
 
 use futures::StreamExt;
 use k8s_openapi::{
     api::core::v1::{Pod, Service},
     apimachinery::pkg::{apis::meta::v1::OwnerReference, util::intstr::IntOrString},
+    chrono::Utc,
 };
 use kube::{
     Api, Client, Resource, ResourceExt,
@@ -13,7 +15,8 @@ use kube::{
         watcher,
     },
 };
-use log::{debug, error, info, warn};
+use log::{debug, error, info};
+use proto::{InterceptEndpoint, PodIdentifier};
 use serde_json::json;
 use std::{sync::Arc, time::Duration};
 
@@ -22,28 +25,7 @@ struct State {
     client: Client,
 }
 
-#[derive(Debug)]
-pub struct PodIdentifier {
-    pub name: String,
-    pub ip: String,
-    pub host_ip: String,
-}
-
-#[derive(Default, Debug)]
-pub struct InterceptEndpoint {
-    pub pod_ids: Vec<PodIdentifier>,
-    pub namespace: String,
-    pub target_port: Option<i32>,
-}
-
-#[tokio::main]
-async fn main() -> Result<(), kube::Error> {
-    env_logger::init();
-
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .unwrap();
-
+pub async fn run() -> Result<(), kube::Error> {
     let client = Client::try_default().await?;
     let intercept_rules = Api::<InterceptRule>::all(client.clone());
 
@@ -61,82 +43,126 @@ async fn main() -> Result<(), kube::Error> {
     Ok(())
 }
 
-async fn reconcile(obj: Arc<InterceptRule>, ctx: Arc<State>) -> Result<Action> {
+async fn reconcile(rule: Arc<InterceptRule>, ctx: Arc<State>) -> Result<Action> {
     let start_time = std::time::Instant::now();
 
-    let namespace = obj.namespace().unwrap_or("default".to_owned());
-    let rule_name = obj.name_any();
+    let namespace = rule.namespace().unwrap_or("default".to_owned());
+    let rule_name = rule.name_any();
     info!("Reconcile request received for InterceptRule '{namespace}/{rule_name}'");
 
-    let services = Api::<Service>::namespaced(ctx.client.clone(), &namespace);
+    let result = try_reconcile(rule.clone(), ctx.clone(), &namespace, &rule_name).await;
 
-    let service_name = &obj.spec.service;
-    let port = &obj.spec.port;
+    let duration = start_time.elapsed();
 
-    debug!(
-        "Processing InterceptRule details for '{namespace}/{rule_name}': Service='{service_name}', Port='{port}'"
-    );
-
-    match services.get(&service_name).await {
-        Ok(service) => {
-            debug!("Target Service '{service_name}' for InterceptRule '{namespace}/{rule_name}'");
-
-            let owner_ref = create_owner_reference(&service)?;
-            debug!(
-                "Created OwnerReference for InterceptRule '{namespace}/{rule_name}': {owner_ref:?}"
+    match result {
+        Ok(action) => {
+            info!(
+                "Rule: {}/{}, Action: {:?}, Duration: {:?}, Reconciliation successful.",
+                namespace, rule_name, action, duration
             );
-
-            let mut owner_refs = obj.metadata.owner_references.clone().unwrap_or_default();
-            let needs_update = !owner_refs.iter().any(|or| or.uid == owner_ref.uid);
-
-            if needs_update {
-                if let Err(_) =
-                    update_owner_reference(&ctx, &mut owner_refs, owner_ref, &namespace, &rule_name)
-                        .await
-                {
-                    return Ok(Action::requeue(Duration::from_secs(15)));
-                }
-            } else {
-                debug!(
-                    "OwnerReference already exists for InterceptRule '{namespace}/{rule_name}', no update needed"
-                );
-            }
-
-            let target_port = service
-                .spec
-                .as_ref()
-                .and_then(|spec| spec.ports.as_ref())
-                .and_then(|ports| ports.iter().find(|&p| p.port == *port as i32))
-                .and_then(|port| port.target_port.clone());
-
-            let intercept_endpoint = match target_port {
-                Some(target_port) => {
-                    debug!("Found targetPort: {target_port:?} for Service port {port}");
-
-                    resolve_intercept_endpoint(&ctx, &namespace, &service, &target_port).await
-                }
-                None => {
-                    warn!(
-                        "Could not find targetPort mapping for Service port {port} in Service '{service_name}'"
-                    );
-                    Ok(InterceptEndpoint::default())
-                }
-            };
-
-            // TODO send endpoints to cni
-            // need to check if target port is not None
-            debug!("intercept endpoint: {intercept_endpoint:?}");
+            Ok(action)
         }
-        Err(e) => {
+        Err(error) => {
             error!(
-                "Failed to get target Service '{service_name}' for InterceptRule '{namespace}/{rule_name}': {e:?}"
+                "Rule: {}/{}, Error: {}, Duration: {:?}, Reconciliation failed.",
+                namespace, rule_name, error, duration
             );
-            return Ok(Action::requeue(Duration::from_secs(30)));
+
+            Ok(Action::requeue(Duration::from_secs(30)))
         }
     }
+}
 
-    let reconcile_duration = start_time.elapsed();
-    info!("Reconciliation finished. {namespace}/{rule_name}, duration={reconcile_duration:?}");
+// Core reconciliation logic extracted into a helper function.
+// Performs the actual steps to reconcile the InterceptRule state.
+async fn try_reconcile(
+    rule: Arc<InterceptRule>,
+    ctx: Arc<State>,
+    namespace: &str,
+    rule_name: &str,
+) -> anyhow::Result<Action> {
+    let services = Api::<Service>::namespaced(ctx.client.clone(), namespace);
+
+    let service_name = &rule.spec.service;
+    let requested_port = rule.spec.port;
+
+    debug!(
+        "Rule: {}/{}, Service: {}, Port: {}, Processing rule details",
+        namespace, rule_name, service_name, requested_port
+    );
+
+    // Get the target Service
+    let service = services
+        .get(service_name)
+        .await
+        .with_context(|| format!("Getting target Service '{}/{}'", namespace, service_name))?;
+
+    debug!(
+        "Rule: {}/{}, Found target Service: {}",
+        namespace, rule_name, service_name
+    );
+
+    //  Ensure OwnerReference exists (or add it)
+    let owner_ref =
+        create_owner_reference(&service).context("Creating OwnerReference from Service")?;
+
+    let mut owner_refs = rule.metadata.owner_references.clone().unwrap_or_default();
+    let needs_update = !owner_refs.iter().any(|or| or.uid == owner_ref.uid);
+
+    if needs_update {
+        info!("Rule: {}/{}, Adding OwnerReference", namespace, rule_name);
+
+        update_owner_reference(&ctx, &mut owner_refs, owner_ref, namespace, rule_name).await?;
+        update_status_last_updated(&ctx, namespace, rule_name).await?;
+    } else {
+        debug!(
+            "Rule: {}/{}, OwnerReference already exists",
+            namespace, rule_name
+        );
+    }
+
+    // Get the targetPort field
+    let target_port = service
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.ports.as_ref())
+        .and_then(|ports| ports.iter().find(|&p| p.port == requested_port as i32))
+        .and_then(|port| port.target_port.clone())
+        .ok_or_else(|| {
+            anyhow!(
+                "Port {} in Service '{}/{}' is missing the 'targetPort' field.",
+                requested_port,
+                namespace,
+                service_name
+            )
+        })?;
+
+    debug!(
+        "Rule: {}/{}, Service Port: {}, Found targetPort: {:?}",
+        namespace, rule_name, requested_port, target_port
+    );
+
+    // Resolve the intercept endpoint
+    let intercept_endpoint = resolve_intercept_endpoint(&ctx, namespace, &service, &target_port)
+        .await
+        .with_context(|| {
+            format!(
+                "Resolving intercept endpoint for Service '{}/{}' targetPort {:?}",
+                namespace, service_name, target_port
+            )
+        })?;
+
+    debug!(
+        "Rule: {}/{}, Resolved intercept endpoint: {:?}",
+        namespace, rule_name, intercept_endpoint
+    );
+
+    // TODO: Use the resolved endpoint information (e.g., send to CNI).
+    info!(
+        "Rule: {}/{}, TODO: Send intercept endpoint data",
+        namespace, rule_name
+    );
+
     Ok(Action::requeue(Duration::from_secs(3600)))
 }
 
@@ -168,21 +194,59 @@ async fn update_owner_reference(
 
     let rules = Api::<InterceptRule>::namespaced(ctx.client.clone(), namespace);
 
-    match rules
+    rules
         .patch(rule_name, &PatchParams::default(), &Patch::Merge(&patch))
         .await
-    {
-        Ok(_) => {
-            info!("Added OwnerReference to InterceptRule '{namespace}/{rule_name}'");
-            Ok(())
+        .with_context(|| {
+            format!(
+                "Failed to patch InterceptRule '{}/{}' to update OwnerReferences",
+                namespace, rule_name
+            )
+        })?;
+
+    info!(
+        "Successfully updated OwnerReferences for InterceptRule '{}/{}'",
+        namespace, rule_name
+    );
+
+    Ok(())
+}
+
+async fn update_status_last_updated(
+    ctx: &Arc<State>,
+    namespace: &str,
+    rule_name: &str,
+) -> anyhow::Result<()> {
+    let now = Utc::now();
+
+    let status_patch = json!({
+        "status": InterceptRuleStatus {
+            last_updated: Some(now),
         }
-        Err(e) => {
-            error!(
-                "Failed to patch InterceptRule '{namespace}/{rule_name}' to add OwnerReference: {e:?}"
-            );
-            Err(e.into())
-        }
-    }
+    });
+
+    let rules_api = Api::<InterceptRule>::namespaced(ctx.client.clone(), namespace);
+
+    rules_api
+        .patch_status(
+            rule_name,
+            &PatchParams::default(),
+            &Patch::Merge(&status_patch),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "Failed to patch status for InterceptRule '{}/{}' to update last_updated",
+                namespace, rule_name
+            )
+        })?;
+
+    info!(
+        "Successfully updated status.last_updated for InterceptRule '{}/{}'",
+        namespace, rule_name
+    );
+
+    Ok(())
 }
 
 async fn resolve_intercept_endpoint(
@@ -190,57 +254,97 @@ async fn resolve_intercept_endpoint(
     namespace: &str,
     svc: &Service,
     target_port: &IntOrString,
-) -> Result<InterceptEndpoint> {
-    if let Some(selector) = svc.spec.as_ref().and_then(|spec| spec.selector.as_ref()) {
-        let label_selector = selector
+) -> anyhow::Result<InterceptEndpoint> {
+    // Get the service selector from the service spec
+    let selector = svc
+        .spec
+        .as_ref()
+        .and_then(|s| s.selector.as_ref())
+        .ok_or_else(|| {
+            anyhow!(
+                "Service '{}/{}' is missing spec or selector.",
+                namespace,
+                svc.name_any(),
+            )
+        })?;
+
+    // Create the label selector string from the selector map
+    // e.g., "app=myapp,tier=frontend"
+    let label_selector = selector
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Retrieve the list of Pods matching the label selector
+    let pods = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
+    let list_params = ListParams::default().labels(&label_selector);
+    let target_pods = pods.list(&list_params).await.with_context(|| {
+        format!(
+            "Failed to list pods with selector '{}' for service '{}/{}'",
+            label_selector,
+            namespace,
+            svc.name_any(),
+        )
+    })?;
+
+    // Resolve the target port (Int or String) to i32
+    let resolved_target_port = match target_port {
+        IntOrString::Int(tp) => Ok(*tp),
+        IntOrString::String(np) => match target_pods
             .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<_>>()
-            .join(",");
-        let pods = Api::<Pod>::namespaced(ctx.client.clone(), &namespace);
-        let list_params = ListParams::default().labels(&label_selector);
+            .find_map(|p| find_named_port_in_pod(p, np))
+        {
+            Some(p) => Ok(p),
+            None => Err(anyhow!(
+                "Named port '{}' specified for service '{}/{}' was not found in any backing pods.",
+                np,
+                namespace,
+                svc.name_any()
+            )),
+        },
+    }?;
 
-        match pods.list(&list_params).await {
-            Ok(pod_list) => {
-                let target_port = match target_port {
-                    IntOrString::Int(tp) => Some(*tp),
-                    IntOrString::String(np) => pod_list
-                        .iter()
-                        .find_map(|pod| find_named_port_in_pod(pod, &np)),
-                };
+    // Create a list of valid PodIdentifiers,
+    // filtering for Pods that have both podIP and hostIP
+    let pod_ids: Vec<PodIdentifier> = target_pods
+        .iter()
+        .filter_map(|p| {
+            let pod_name = p.name_any();
+            let pod_status = p.status.as_ref();
 
-                let pod_ids: Vec<PodIdentifier> = pod_list
-                    .iter()
-                    .filter_map(|pod| {
-                        let name = pod.name_any();
-                        let status = pod.status.as_ref();
+            let pod_ip = pod_status
+                .and_then(|s| s.pod_ip.as_ref())
+                .filter(|ip| !ip.is_empty());
 
-                        let pod_ip = status.and_then(|s| s.pod_ip.as_ref());
-                        let host_ip = status.and_then(|s| s.host_ip.as_ref());
+            let host_ip = pod_status.and_then(|s| s.host_ip.clone());
 
-                        if let (Some(pod_ip), Some(host_ip)) = (pod_ip, host_ip) {
-                            Some(PodIdentifier {
-                                name,
-                                ip: pod_ip.clone(),
-                                host_ip: host_ip.clone(),
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-
-                return Ok(InterceptEndpoint {
-                    pod_ids,
-                    namespace: namespace.to_owned(),
-                    target_port,
-                });
+            if let (Some(pod_ip), Some(host_ip)) = (pod_ip, host_ip) {
+                Some(PodIdentifier {
+                    name: pod_name,
+                    ip: pod_ip.clone(),
+                    host_ip,
+                })
+            } else {
+                None
             }
-            _ => {}
-        }
+        })
+        .collect();
+
+    // Return an error if no valid Pods were found
+    if pod_ids.is_empty() {
+        bail!(
+            "No valid pods found for service '{}' in namespace '{}' matching the selector and having both required IPs (podIP, hostIP).",
+            svc.name_any(),
+            namespace
+        );
     }
 
-    Ok(InterceptEndpoint::default())
+    Ok(InterceptEndpoint {
+        pod_ids,
+        namespace: namespace.to_owned(),
+        target_port: resolved_target_port,
+    })
 }
 
 fn find_named_port_in_pod(pod: &Pod, named_port: &str) -> Option<i32> {

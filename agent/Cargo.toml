@@ -4,11 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [[bin]]
-doc = false
-name = "ctrl"
-path = "src/ctrl/app.rs"
-
-[[bin]]
 name = "crdgen"
 path = "src/ctrl/crdgen.rs"
 

@@ -350,12 +350,31 @@ impl<'a> Deploy<'a> {
                 ..Default::default()
             },
             rules: Some({
-                vec![PolicyRule {
-                    api_groups: Some(vec!["".to_owned()]),
-                    resources: Some(vec!["services".to_owned()]),
-                    verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
-                    ..Default::default()
-                }]
+                vec![
+                    PolicyRule {
+                        api_groups: Some(vec!["".to_owned()]),
+                        resources: Some(vec!["pods".to_owned(), "services".to_owned()]),
+                        verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
+                        ..Default::default()
+                    },
+                    PolicyRule {
+                        api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
+                        resources: Some(vec!["interceptrules".to_owned()]),
+                        verbs: vec![
+                            "get".to_owned(),
+                            "watch".to_owned(),
+                            "list".to_owned(),
+                            "patch".to_owned(),
+                        ],
+                        ..Default::default()
+                    },
+                    PolicyRule {
+                        api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
+                        resources: Some(vec!["interceptrules/status".to_owned()]),
+                        verbs: vec!["get".to_owned(), "patch".to_owned()],
+                        ..Default::default()
+                    },
+                ]
             }),
         };
 
