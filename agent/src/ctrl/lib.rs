@@ -27,5 +27,5 @@ pub struct InterceptRuleSpec {
 
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema)]
 pub struct InterceptRuleStatus {
-    last_updated: Option<DateTime<Utc>>,
+    pub last_updated: Option<DateTime<Utc>>,
 }

@@ -18,7 +18,7 @@ message DiscoveryResponse {
 message InterceptEndpoint {
   repeated PodIdentifier pod_ids = 1;
   string namespace = 2;
-  string target_port = 3;
+  int32 target_port = 3;
 }
 
 message PodIdentifier {

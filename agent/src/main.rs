@@ -25,6 +25,7 @@ use tokio::sync::{Mutex, RwLock, mpsc};
 use tonic::transport;
 use uuid::Uuid;
 
+mod ctrl;
 mod discovery;
 mod server;
 
@@ -73,6 +74,13 @@ async fn main() -> Result<()> {
             .serve(addr)
             .await
             .unwrap()
+    });
+
+    // controller thread
+    tokio::spawn(async move {
+        ctrl::run()
+            .await
+            .expect("Failed to run InterceptRule controller");
     });
 
     let dial_map: HashMap<Uuid, mpsc::Sender<DialRequest>> = HashMap::new();
