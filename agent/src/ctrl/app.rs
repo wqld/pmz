@@ -15,22 +15,29 @@ use kube::{
         watcher,
     },
 };
-use log::{debug, error, info};
+use log::{debug, error, info, warn};
 use proto::{InterceptEndpoint, PodIdentifier};
 use serde_json::json;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
+use tokio::sync::RwLock;
+
+use crate::DiscovertTx;
 
 #[derive(Clone)]
 struct State {
     client: Client,
+    subscribers: Arc<RwLock<HashMap<String, DiscovertTx>>>,
 }
 
-pub async fn run() -> Result<(), kube::Error> {
+pub async fn run(
+    subscribers: Arc<RwLock<HashMap<String, DiscovertTx>>>,
+) -> Result<(), kube::Error> {
     let client = Client::try_default().await?;
     let intercept_rules = Api::<InterceptRule>::all(client.clone());
 
     let state = State {
         client: client.clone(),
+        subscribers,
     };
 
     Controller::new(intercept_rules, watcher::Config::default())
@@ -157,13 +164,66 @@ async fn try_reconcile(
         namespace, rule_name, intercept_endpoint
     );
 
-    // TODO: Use the resolved endpoint information (e.g., send to CNI).
-    info!(
-        "Rule: {}/{}, TODO: Send intercept endpoint data",
-        namespace, rule_name
-    );
+    process_and_notify(&ctx, &intercept_endpoint).await
+}
 
-    Ok(Action::requeue(Duration::from_secs(3600)))
+async fn process_and_notify(
+    ctx: &Arc<State>,
+    intercept_endpoint: &proto::InterceptEndpoint,
+) -> anyhow::Result<Action> {
+    let mut pods_by_host_ip: HashMap<String, Vec<PodIdentifier>> = HashMap::new();
+
+    for pod_identifier in intercept_endpoint.pod_ids.iter() {
+        let key = pod_identifier.host_ip.clone();
+        pods_by_host_ip
+            .entry(key)
+            .or_default()
+            .push(pod_identifier.clone());
+    }
+
+    let subs = ctx.subscribers.read().await;
+    let mut any_subscriber_missing = false;
+
+    for (host_ip_key, pods_for_this_host) in pods_by_host_ip {
+        if let Some(subscriber_tx) = subs.get(&host_ip_key) {
+            let resource_for_subscriber = proto::InterceptEndpoint {
+                pod_ids: pods_for_this_host,
+                namespace: intercept_endpoint.namespace.clone(),
+                target_port: intercept_endpoint.target_port,
+            };
+
+            let resp = proto::DiscoveryResponse {
+                version_info: "v1.0-alpha".to_string(),
+                resources: vec![resource_for_subscriber],
+            };
+
+            debug!(
+                "Sending update to subscriber at {}: {:?}",
+                host_ip_key, resp
+            );
+
+            if let Err(e) = subscriber_tx.send(Ok(resp.clone())).await {
+                error!(
+                    "Failed to send message to subscriber {}: {}",
+                    host_ip_key, e
+                );
+            }
+        } else {
+            warn!(
+                "No active subscriber found for host IP: {}. Update not delivered.",
+                host_ip_key
+            );
+            any_subscriber_missing = true;
+        }
+    }
+
+    if any_subscriber_missing {
+        debug!("One or more subscribers were missing for this endpoint, requesting short requeue.");
+        Ok(Action::requeue(Duration::from_secs(5)))
+    } else {
+        debug!("All found subscribers notified (or send attempted). Requesting long requeue.");
+        Ok(Action::requeue(Duration::from_secs(3600)))
+    }
 }
 
 fn create_owner_reference(svc: &Service) -> Result<OwnerReference> {
