@@ -6,8 +6,9 @@ use tokio::sync::{RwLock, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
 
+use crate::DiscovertTx;
+
 type InterceptResult<T> = Result<Response<T>, Status>;
-type DiscovertTx = mpsc::Sender<Result<DiscoveryResponse, Status>>;
 type ResponseStream = Pin<Box<dyn Stream<Item = Result<DiscoveryResponse, Status>> + Send>>;
 
 pub struct DiscoveryServer {

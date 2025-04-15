@@ -22,12 +22,14 @@ use proxy::{
 use server::InterceptTunnel;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc};
-use tonic::transport;
+use tonic::{Status, transport};
 use uuid::Uuid;
 
 mod ctrl;
 mod discovery;
 mod server;
+
+type DiscovertTx = mpsc::Sender<Result<proto::DiscoveryResponse, Status>>;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -76,9 +78,11 @@ async fn main() -> Result<()> {
             .unwrap()
     });
 
+    let subs_clone = subs.clone();
+
     // controller thread
     tokio::spawn(async move {
-        ctrl::run()
+        ctrl::run(subs_clone)
             .await
             .expect("Failed to run InterceptRule controller");
     });
