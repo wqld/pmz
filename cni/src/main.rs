@@ -1,6 +1,7 @@
 use std::{
     ffi::OsStr,
-    os::unix::fs::PermissionsExt,
+    net::IpAddr,
+    os::{fd::AsFd, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -16,13 +17,13 @@ use hyper::{
 };
 use hyper_util::rt::TokioIo;
 use log::{debug, error, info, warn};
+use nix::sched::{CloneFlags, setns};
 use proto::{DiscoveryRequest, intercept_discovery_client::InterceptDiscoveryClient};
+use rsln::{netlink::Netlink, types::addr::AddrFamily};
 use serde::{Deserialize, Serialize};
-use tokio::{net::UnixListener, time::sleep};
+use tokio::{fs::File, net::UnixListener, time::sleep};
 use tokio_stream::StreamExt;
 use tonic::transport;
-
-mod discovery;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -109,8 +110,83 @@ async fn main() -> Result<()> {
 
         debug!("Discovery: streaming started..");
 
+        let self_netns_path = "/proc/self/ns/net";
+        let current_netns = File::open(self_netns_path).await.unwrap();
+        let current_netns_fd = current_netns.as_fd();
+
         while let Some(resp) = stream.next().await {
             debug!("received: {resp:?}");
+
+            if let Ok(resp) = resp {
+                for intercept_endpoints in resp.resources {
+                    // let namespace = intercept_endpoints.namespace;
+                    // let target_port = intercept_endpoints.target_port;
+
+                    let mut target_netns_list = vec![];
+
+                    for pod_identifier in intercept_endpoints.pod_ids {
+                        // let pod_name = pod_identifier.name;
+                        let pod_ip = pod_identifier.ip;
+                        let pod_ip = pod_ip.parse()?;
+
+                        let mut oldest_starttime = u64::MAX;
+                        let mut matched_netns_path = None;
+
+                        let procs = procfs::process::all_processes_with_root("/host/proc").unwrap();
+
+                        for proc in procs {
+                            let p = match proc {
+                                Ok(p) => p,
+                                Err(_) => continue,
+                            };
+
+                            let pid = p.pid();
+                            let target_netns_path_str = format!("/host/proc/{}/ns/net", pid);
+                            let target_netns_path = Path::new(&target_netns_path_str);
+
+                            let target_netns = match File::open(target_netns_path).await {
+                                Ok(f) => f,
+                                Err(_) => continue,
+                            };
+                            let target_netns_fd = target_netns.as_fd();
+
+                            let match_found = run_in_ns(current_netns_fd, target_netns_fd, || {
+                                has_local_ip_address(pod_ip)
+                            })?;
+
+                            if !match_found {
+                                continue;
+                            }
+
+                            let exec_cmd = p.exe()?;
+                            debug!("match {pod_ip:?} with {exec_cmd:?}");
+
+                            match p.stat() {
+                                Ok(stat) => {
+                                    if stat.starttime < oldest_starttime {
+                                        matched_netns_path = Some(target_netns_path_str);
+                                        oldest_starttime = stat.starttime;
+                                    }
+                                }
+                                Err(e) => {
+                                    error!("Failed to read proc {pid} stats: {e:?}");
+
+                                    if matched_netns_path.is_none() {
+                                        matched_netns_path = Some(target_netns_path_str);
+                                    }
+                                }
+                            }
+                        }
+
+                        if let Some(netns_path) = matched_netns_path {
+                            debug!("target netns: {netns_path}");
+                            target_netns_list.push(netns_path);
+                        } else {
+                            error!("Can't find target netns for {pod_ip:?}");
+                        }
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -148,6 +224,34 @@ async fn main() -> Result<()> {
             }
         });
     }
+}
+
+fn has_local_ip_address(target_ip: IpAddr) -> Result<bool> {
+    let mut netlink = Netlink::new();
+    let addrs = netlink.addr_list_all(AddrFamily::All)?;
+
+    Ok(addrs
+        .iter()
+        .map(|addr| addr.ip.addr())
+        .any(|ip| ip == target_ip))
+}
+
+fn run_in_ns<Fd, F, T>(current_netns: Fd, target_netns: Fd, f: F) -> Result<T>
+where
+    Fd: AsFd,
+    F: FnOnce() -> Result<T>,
+{
+    if let Err(e) = setns(&target_netns, CloneFlags::CLONE_NEWNET) {
+        return Err(e.into());
+    }
+
+    let ret = f()?;
+
+    if let Err(e) = setns(&current_netns, CloneFlags::CLONE_NEWNET) {
+        return Err(e.into());
+    }
+
+    Ok(ret)
 }
 
 // If there are multiple CNI configuration files in the directory,
