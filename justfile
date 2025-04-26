@@ -29,3 +29,7 @@ alias patg := publish-agent-to-ghrc
 
 @install-crd:
     cargo run -p agent --bin crdgen | kubectl apply -f -
+
+@build-proto:
+    cargo clean -p proto
+    cargo build -p proto

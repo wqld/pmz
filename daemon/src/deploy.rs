@@ -123,6 +123,14 @@ impl<'a> Deploy<'a> {
                                 }),
                                 ..Default::default()
                             },
+                            Volume {
+                                name: "host-proc".to_string(),
+                                host_path: Some(HostPathVolumeSource {
+                                    path: "/proc".to_string(),
+                                    type_: Some("Directory".to_string())
+                                }),
+                                ..Default::default()
+                            }
                         ]),
                         init_containers: Some(vec![Container {
                             name: "install-cni".to_string(),
@@ -189,6 +197,12 @@ impl<'a> Deploy<'a> {
                                 VolumeMount {
                                     name: "pmz-dir".to_string(),
                                     mount_path: "/var/run/pmz".to_string(),
+                                    ..Default::default()
+                                },
+                                VolumeMount {
+                                    name: "host-proc".to_string(),
+                                    mount_path: "/host/proc".to_string(),
+                                    read_only: Some(true),
                                     ..Default::default()
                                 }
                             ]),
