@@ -7,13 +7,10 @@ mod interceptor;
 mod resolver;
 
 use aya_ebpf::{
-    bindings::{
-        TC_ACT_PIPE,
-        xdp_action::{XDP_ABORTED, XDP_PASS},
-    },
-    macros::{classifier, map, xdp},
+    bindings::TC_ACT_PIPE,
+    macros::{classifier, map},
     maps::{HashMap, LruHashMap},
-    programs::{TcContext, XdpContext},
+    programs::TcContext,
 };
 use aya_log_ebpf::error;
 use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
@@ -99,24 +96,22 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
     forwarder.handle_egress()
 }
 
-#[xdp]
-pub fn interceptor(mut ctx: XdpContext) -> u32 {
+#[classifier]
+pub fn interceptor(mut ctx: TcContext) -> i32 {
     match try_interceptor(&mut ctx) {
         Ok(ret) => ret,
-        Err(_) => XDP_ABORTED,
+        Err(_) => TC_ACT_PIPE,
     }
 }
 
-fn try_interceptor(ctx: &mut XdpContext) -> Result<u32, ()> {
-    // info!(ctx, "received a packet");
-
-    let mut ctx = match Context::load(ctx, Kind::XDP) {
+fn try_interceptor(ctx: &mut TcContext) -> Result<i32, &'static str> {
+    let mut ctx = match Context::load(ctx, Kind::TC) {
         Ok(ctx) => ctx,
-        _ => return Ok(XDP_PASS),
+        _ => return Ok(TC_ACT_PIPE),
     };
 
     let mut interceptor = Interceptor::new(&mut ctx);
-    interceptor.handle_xdp()
+    interceptor.handle_ingress()
 }
 
 #[cfg(not(test))]

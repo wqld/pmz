@@ -118,6 +118,7 @@ where
         Ok(ctx)
     }
 
+    // TODO
     pub fn update_hdrs_for_dns(&mut self) -> Result<(), &'static str> {
         self.eth_hdr = self.ptr_at_mut(0)?;
         self.ip_hdr = self.ptr_at_mut(EthHdr::LEN)?;
