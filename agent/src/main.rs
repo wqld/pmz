@@ -6,13 +6,17 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use clap::Parser;
 
+use ::ctrl::{InterceptRule, InterceptRuleSpec};
 use ::proxy::tunnel;
 use ::proxy::tunnel::server::TunnelServer;
 use discovery::DiscoveryServer;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Service;
-use kube::runtime::{WatchStreamExt, watcher};
-use kube::{Api, ResourceExt};
+use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+use kube::api::{Patch, PatchParams};
+use kube::runtime::wait::await_condition;
+use kube::runtime::{WatchStreamExt, conditions, watcher};
+use kube::{Api, CustomResourceExt, ResourceExt};
 use log::{debug, error};
 use proto::intercept_discovery_server::InterceptDiscoveryServer;
 use proxy::{
@@ -110,7 +114,7 @@ async fn main() -> Result<()> {
                 debug!("received rule key: {key:?}, value: {value:?}");
                 // update intercept rule & route map
                 let client = kube::Client::try_default().await.unwrap();
-                let api: Api<Service> = Api::namespaced(client, &key.namespace);
+                let api: Api<Service> = Api::namespaced(client.clone(), &key.namespace);
                 let svc = api.get(&key.service).await.unwrap();
                 let spec = svc.spec.unwrap();
                 let cluster_ip = spec.cluster_ip.unwrap_or_default();
@@ -140,6 +144,48 @@ async fn main() -> Result<()> {
                     target_port: value.target_port,
                 };
                 debug!("intercept route key: {rkey:?}, value: {rvalue:?}");
+
+                let ssapply = PatchParams::apply("pmz-agent").force();
+                let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+                crds.patch(
+                    "interceptrules.pmz.sinabro.io",
+                    &ssapply,
+                    &Patch::Apply(InterceptRule::crd()),
+                )
+                .await
+                .unwrap();
+
+                debug!("Waiting for the api-server to accept the CRD");
+                let establish = await_condition(
+                    crds,
+                    "interceptrules.pmz.sinabro.io",
+                    conditions::is_crd_established(),
+                );
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish)
+                    .await
+                    .unwrap();
+
+                let intercept_rule_api: Api<InterceptRule> =
+                    Api::namespaced(client.clone(), &key.namespace);
+
+                let intercelt_rule_name = format!("{}-{}", key.service, key.port);
+                let intercept_rule_cr = InterceptRule::new(
+                    &intercelt_rule_name,
+                    InterceptRuleSpec {
+                        service: key.service.clone(),
+                        port: key.port,
+                        local_port: value.target_port,
+                        id: value.id.to_string(),
+                    },
+                );
+                intercept_rule_api
+                    .patch(
+                        &intercelt_rule_name,
+                        &ssapply,
+                        &Patch::Apply(&intercept_rule_cr),
+                    )
+                    .await
+                    .unwrap();
 
                 // TODO: Remove route map. eBPF redirection is not feasible;
                 // use CRD for intercept rules, enabling CNI handling
@@ -264,7 +310,7 @@ async fn main() -> Result<()> {
 
             // TODO retrieve the target ip & port from the header
             let (ip, port) = {
-                let target_ip = 174086685; // u32::from_be(0);
+                let target_ip = 174126728; // u32::from_be(echo service's cluster ip);
                 let target_port = 80; // u16::from_be(0);
 
                 (target_ip, target_port)

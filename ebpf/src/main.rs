@@ -3,7 +3,6 @@
 
 mod context;
 mod forwarder;
-mod interceptor;
 mod resolver;
 
 use aya_ebpf::{
@@ -16,7 +15,6 @@ use aya_log_ebpf::error;
 use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
 use context::{Context, Kind, Protocol};
 use forwarder::TrafficForwarder;
-use interceptor::Interceptor;
 use resolver::DnsResolver;
 
 #[map]
@@ -29,7 +27,7 @@ static SERVICE_REGISTRY: HashMap<DnsQuery, DnsRecordA> = HashMap::with_max_entri
 static NAT_TABLE: LruHashMap<SockPair, SockAddr> = LruHashMap::with_max_entries(65536, 0);
 
 #[map]
-static INTERCEPT_RULE: HashMap<SockAddr, SockAddr> = HashMap::with_max_entries(256, 0);
+static INTERCEPT_RULE: HashMap<u16, SockAddr> = HashMap::with_max_entries(256, 0);
 
 #[classifier]
 pub fn resolver(mut ctx: TcContext) -> i32 {
@@ -94,24 +92,6 @@ fn try_forward_egress(ctx: &mut TcContext) -> Result<i32, &'static str> {
 
     let mut forwarder = TrafficForwarder::new(&mut ctx);
     forwarder.handle_egress()
-}
-
-#[classifier]
-pub fn interceptor(mut ctx: TcContext) -> i32 {
-    match try_interceptor(&mut ctx) {
-        Ok(ret) => ret,
-        Err(_) => TC_ACT_PIPE,
-    }
-}
-
-fn try_interceptor(ctx: &mut TcContext) -> Result<i32, &'static str> {
-    let mut ctx = match Context::load(ctx, Kind::TC) {
-        Ok(ctx) => ctx,
-        _ => return Ok(TC_ACT_PIPE),
-    };
-
-    let mut interceptor = Interceptor::new(&mut ctx);
-    interceptor.handle_ingress()
 }
 
 #[cfg(not(test))]

@@ -15,7 +15,7 @@ network-types = "0.0.7"
 memoffset = "0.9.1"
 
 [build-dependencies]
-which = { workspace = true }
+which = { workspace = true, features = ["real-sys"] }
 
 [[bin]]
 name = "pmz"
