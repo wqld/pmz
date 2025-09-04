@@ -22,6 +22,8 @@ RUN cp target/$(cat /rust_target.txt)/release/cni-plugin target/pmz-cni-plugin
 
 FROM alpine:3.18 AS runtime
 
+RUN apk add --no-cache iptables
+
 COPY --from=builder --chown=root:root /target/pmz-cni /app/
 COPY --from=builder --chown=root:root /target/pmz-cni-plugin /app/
 

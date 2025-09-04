@@ -1,13 +1,12 @@
 use std::{
     ffi::OsStr,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     os::{fd::AsFd, unix::fs::PermissionsExt},
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{Result, bail};
-use aya::programs::{SchedClassifier, tc};
 use clap::Parser;
 use http_body_util::Full;
 use hyper::{
@@ -22,7 +21,12 @@ use nix::sched::{CloneFlags, setns};
 use proto::{DiscoveryRequest, intercept_discovery_client::InterceptDiscoveryClient};
 use rsln::{netlink::Netlink, types::addr::AddrFamily};
 use serde::{Deserialize, Serialize};
-use tokio::{fs::File, net::UnixListener, time::sleep};
+use socket2::SockRef;
+use tokio::{
+    fs::File,
+    net::{TcpStream, UnixListener},
+    time::sleep,
+};
 use tokio_stream::StreamExt;
 use tonic::transport;
 
@@ -54,39 +58,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let namespace = std::env::var("CNI_NAMESPACE")?;
     let host_ip = std::env::var("HOST_IP")?;
-
-    // Bump the memlock rlimit. This is needed for older kernels that don't use the
-    // new memcg based accounting, see https://lwn.net/Articles/837122/
-    let rlim = libc::rlimit {
-        rlim_cur: libc::RLIM_INFINITY,
-        rlim_max: libc::RLIM_INFINITY,
-    };
-    let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
-    if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {}", ret);
-    }
-
-    // This will include your eBPF object file as raw bytes at compile-time and load it at
-    // runtime. This approach is recommended for most real-world use cases. If you would
-    // like to specify the eBPF program at runtime rather than at compile-time, you can
-    // reach for `Bpf::load_file` instead.
-    let mut ebpf = aya::Ebpf::load(aya::include_bytes_aligned!(concat!(
-        env!("OUT_DIR"),
-        "/pmz"
-    )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        // This can happen if you remove all log statements from your eBPF program.
-        warn!("failed to initialize eBPF logger: {}", e);
-    }
-
-    let iface = args.iface;
-    // error adding clsact to the interface if it is already added is harmless
-    // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
-    let _ = tc::qdisc_add_clsact(&iface);
-
-    let interceptor: &mut SchedClassifier = ebpf.program_mut("interceptor").unwrap().try_into()?;
-    interceptor.load()?;
-    interceptor.attach(&iface, tc::TcAttachType::Ingress)?;
 
     // discovery thread
     tokio::spawn(async move {
@@ -159,7 +130,7 @@ async fn main() -> Result<()> {
                     // let namespace = intercept_endpoints.namespace;
                     // let target_port = intercept_endpoints.target_port;
 
-                    let mut target_netns_list = vec![];
+                    // let mut target_netns_list = vec![];
 
                     for pod_identifier in intercept_endpoints.pod_ids {
                         // let pod_name = pod_identifier.name;
@@ -217,7 +188,78 @@ async fn main() -> Result<()> {
 
                         if let Some(netns_path) = matched_netns_path {
                             debug!("target netns: {netns_path}");
-                            target_netns_list.push(netns_path);
+                            let target_netns = match File::open(netns_path).await {
+                                Ok(f) => f,
+                                Err(_) => continue,
+                            };
+                            let target_netns_fd = target_netns.as_fd();
+                            let addr = SocketAddr::from(([0, 0, 0, 0], 18325));
+
+                            debug!("addr: {:?}", addr);
+
+                            let sock = run_in_ns(current_netns_fd, target_netns_fd, || {
+                                match setup_inpod_iptables_rule(addr) {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        error!("Failed to set up in-pod iptables rule: {:?}", e);
+                                    }
+                                }
+                                Ok(tokio::net::TcpSocket::new_v4())
+                            })??;
+
+                            sock.set_reuseport(true)?;
+                            sock.bind(addr)?;
+                            let listener = sock.listen(128)?;
+                            // SockRef::from(&listener).set_ip_transparent_v4(true)?;
+                            // let listener = SockRef::from(&listener);
+                            const INTERCEPT_GATE_ADDR: &str = "127.0.0.1:18326";
+
+                            tokio::spawn(async move {
+                                debug!(
+                                    "intercept listener is now running, accepting connections.."
+                                );
+                                loop {
+                                    match listener.accept().await {
+                                        Ok((mut inbound_stream, remote_addr)) => {
+                                            debug!(
+                                                "Accepted new connection from {:?}",
+                                                remote_addr
+                                            );
+
+                                            let socket_ref = SockRef::from(&inbound_stream);
+                                            let original_dst = match socket_ref.original_dst_v4() {
+                                                Ok(addr) => addr.as_socket().unwrap(),
+                                                Err(_) => todo!(),
+                                            };
+                                            debug!("Original dest: {:?}", original_dst);
+
+                                            tokio::spawn(async move {
+                                                let mut gate_stream =
+                                                    TcpStream::connect(INTERCEPT_GATE_ADDR)
+                                                        .await
+                                                        .unwrap();
+
+                                                debug!(
+                                                    "Proxying connection from {} to {}",
+                                                    remote_addr, INTERCEPT_GATE_ADDR
+                                                );
+
+                                                tokio::io::copy_bidirectional(
+                                                    &mut inbound_stream,
+                                                    &mut gate_stream,
+                                                )
+                                                .await
+                                                .unwrap();
+                                            });
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to accept connection: {:?}", e)
+                                        }
+                                    }
+                                }
+                            });
+
+                            // target_netns_list.push(netns_path);
                         } else {
                             error!("Can't find target netns for {pod_ip:?}");
                         }
@@ -375,6 +417,102 @@ fn upsert_plugin_config(plugins: &mut Vec<serde_json::Value>) -> Result<()> {
 
 async fn handle_request(_req: Request<Incoming>) -> Result<Response<Full<Bytes>>> {
     Ok(Response::new(Full::from("handle requested")))
+}
+
+fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
+    debug!("Start to setup inpod iptables rule..");
+    let proxy_port_str = addr.port().to_string();
+    let intercept_chain = "PMZ_INTERCEPT";
+    let conn_mark = "1337";
+
+    let rules = vec![
+        vec!["-t", "nat", "-N", intercept_chain],
+        vec!["-t", "nat", "-F", intercept_chain],
+        vec![
+            "-t",
+            "nat",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "-j",
+            intercept_chain,
+        ],
+        vec![
+            "-t",
+            "nat",
+            "-A",
+            intercept_chain,
+            "-m",
+            "mark",
+            "--mark",
+            conn_mark,
+            "-j",
+            "RETURN",
+        ],
+        vec![
+            "-t",
+            "nat",
+            "-A",
+            intercept_chain,
+            "-d",
+            "127.0.0.1/32",
+            "-j",
+            "RETURN",
+        ],
+        vec![
+            "-t",
+            "nat",
+            "-A",
+            intercept_chain,
+            "-p",
+            "tcp",
+            "-j",
+            "CONNMARK",
+            "--set-mark",
+            conn_mark,
+        ],
+        vec![
+            "-t",
+            "nat",
+            "-A",
+            intercept_chain,
+            "-p",
+            "tcp",
+            "-j",
+            "REDIRECT",
+            "--to-ports",
+            &proxy_port_str,
+        ],
+    ];
+
+    for rule in rules {
+        let mut command = std::process::Command::new("iptables");
+        command.args(&rule);
+
+        let output = command.output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if rule.get(2) == Some(&"-N") && stderr.contains("Chain already exists") {
+                debug!(
+                    "Chain '{}' already exists, which is safe to ignore.",
+                    rule[3]
+                );
+                continue;
+            }
+
+            anyhow::bail!(
+                "iptables command failed: {:?}, status: {}, stderr: {}",
+                &rule,
+                output.status,
+                stderr
+            );
+        }
+    }
+    info!("Successfully applied iptables INTERCEPT rules.");
+    Ok(())
 }
 
 #[cfg(test)]

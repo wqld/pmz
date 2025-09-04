@@ -112,7 +112,58 @@ kubernetes.default.svc 10.96.0.1
 
 ### Sidecarless interception
 
-Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection. (Not implemented yet)
+Intercept requests to specific Kubernetes workloads locally without requiring pod restarts or sidecar injection.
+
+Identify the target workload for traffic interception (e.g., the `echo` pod).
+
+```sh
+> k get svc,po
+NAME                 TYPE        CLUSTER-IP      EXTERNAL-IP   PORT(S)              AGE
+service/echo         ClusterIP   10.96.246.136   <none>        80/TCP               4m48s
+service/kubernetes   ClusterIP   10.96.0.1       <none>        443/TCP              5d11h
+service/pmz-agent    ClusterIP   10.96.9.34      <none>        8101/TCP,50018/TCP   96s
+
+NAME                             READY   STATUS    RESTARTS   AGE
+pod/echo                         1/1     Running   0          4m48s
+pod/pmz-agent-5b88656c74-mjp7s   1/1     Running   0          96s
+pod/pmz-cni-z4z6f                1/1     Running   0          96s
+```
+
+Start your local process to handle the intercepted requests.
+
+```sh
+> docker run -d -p 8081:80 ealen/echo-server
+f23ba541dc7b27293a3afc2da0f3ecb64a80180a7aac9bfb5bbaf49cdd9ff564
+```
+
+Apply an intercept rule with the `pmzctl intercept` command, then call the service via its FQDN.
+
+```sh
+> pmzctl intercept add -s echo -p 8081:80
+[DEBUG pmzctl] pmzctl intercept add
+200 OK: intercept request processed successfully
+
+> curl "echo.default.svc:80/?echo_body=amazing"
+"amazing"⏎
+```
+
+Verify the intercept is working by checking the logs of your local process after a successful request.
+
+```sh
+> docker logs -f f23b
+Listening on port 80.
+{
+  "name":"echo-server","hostname":"f23ba541dc7b","pid":1,"level":30,
+  "host":{"hostname":"echo.default.svc","ip":"::ffff:172.17.0.1","ips":[]},
+  "http":{"method":"GET","baseUrl":"","originalUrl":"/?echo_body=amazing","protocol":"http"},
+  "request":{"params":{},"query":{"echo_body":"amazing"},
+  "cookies":{},
+  "body":{},
+  "headers":{"host":"echo.default.svc","user-agent":"curl/8.15.0","accept":"*/*"}},
+  "environment":{"PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME":"f23ba541dc7b","NODE_VERSION":"20.11.0","YARN_VERSION":"1.22.19","HOME":"/root"},
+  "msg":"Thu, 04 Sep 2025 14:20:11 GMT | [GET] - http://echo.default.svc/?echo_body=amazing","time":"2025-09-04T14:20:11.381Z","v":0
+}
+```
 
 ### Domain-based personal intercepts
 

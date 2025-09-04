@@ -375,6 +375,7 @@ impl<'a> Deploy<'a> {
                         api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
                         resources: Some(vec!["interceptrules".to_owned()]),
                         verbs: vec![
+                            "create".to_owned(),
                             "get".to_owned(),
                             "watch".to_owned(),
                             "list".to_owned(),
@@ -386,6 +387,12 @@ impl<'a> Deploy<'a> {
                         api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
                         resources: Some(vec!["interceptrules/status".to_owned()]),
                         verbs: vec!["get".to_owned(), "patch".to_owned()],
+                        ..Default::default()
+                    },
+                    PolicyRule {
+                        api_groups: Some(vec!["apiextensions.k8s.io".to_owned()]),
+                        resources: Some(vec!["customresourcedefinitions".to_owned()]),
+                        verbs: vec!["patch".to_owned()],
                         ..Default::default()
                     },
                 ]

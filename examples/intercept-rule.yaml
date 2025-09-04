@@ -1,0 +1,10 @@
+apiVersion: pmz.sinabro.io/v1alpha1
+kind: InterceptRule
+metadata:
+  name: example
+  namespace: default
+spec:
+  id: id
+  localPort: 8081
+  port: 80
+  service: echo
