@@ -51,11 +51,15 @@ pub async fn run(
 }
 
 async fn reconcile(rule: Arc<InterceptRule>, ctx: Arc<State>) -> Result<Action> {
+    // TODO logic to handle events that delete interceptRule must also be added.
+    // TODO notify the CNI pod so that inpod traffic redirection can be cleared.
     let start_time = std::time::Instant::now();
 
     let namespace = rule.namespace().unwrap_or("default".to_owned());
     let rule_name = rule.name_any();
     info!("Reconcile request received for InterceptRule '{namespace}/{rule_name}'");
+
+    // TODO if rule.metadata.deletion_timestamp.is_some() {}
 
     let result = try_reconcile(rule.clone(), ctx.clone(), &namespace, &rule_name).await;
 

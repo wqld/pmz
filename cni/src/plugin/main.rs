@@ -1,8 +1,12 @@
-use std::{collections::HashMap, io::Write};
+use std::{collections::HashMap, io::Write, path::Path};
 
 use anyhow::Result;
-use log::debug;
-use tokio::io::AsyncReadExt;
+use cni::{CniAddEvent, CniConfig, CniResult};
+use http_body_util::Full;
+use hyper::{body::Bytes, client::conn::http1};
+use hyper_util::rt::TokioIo;
+use log::{debug, error};
+use tokio::{io::AsyncReadExt, net::UnixStream};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,18 +41,56 @@ async fn main() -> Result<()> {
             let cni_args_str = std::env::var("CNI_ARGS").unwrap_or_default();
             let cni_args_map = parse_cni_args(&cni_args_str);
 
-            let namespace = cni_args_map.get("K8S_POD_NAMESPACE");
-            let pod_name = cni_args_map.get("K8S_POD_NAME");
+            let namespace = cni_args_map.get("K8S_POD_NAMESPACE").unwrap();
+            let pod_name = cni_args_map.get("K8S_POD_NAME").unwrap();
 
-            let mut buf = String::new();
-            tokio::io::stdin().read_to_string(&mut buf).await?;
+            let mut buf = vec![];
+            tokio::io::stdin().read_to_end(&mut buf).await?;
 
-            debug!("{namespace:?}/{pod_name:?} (ADD) netns {netns:?}, netdev {netdev:?}: {buf:?}");
+            let mut conf: CniConfig = serde_json::from_slice(&buf)?;
+            let mut output = None;
 
-            let config: serde_json::Value = serde_json::from_str(&buf)?;
-            let prev_result = config.get("prevResult").unwrap();
-            let output = serde_json::to_string(prev_result)?;
-            println!("{}", output);
+            if let Some(value) = conf.raw_prev_result.take() {
+                let prev_result: CniResult = serde_json::from_value(value)?;
+                output = Some(serde_json::to_string(&prev_result)?);
+                conf.prev_result = Some(prev_result);
+            }
+
+            debug!("{namespace:?}/{pod_name:?} (ADD) netns {netns:?}, netdev {netdev:?}: {conf:?}");
+
+            let ips = conf.prev_result.and_then(|r| r.ips).unwrap();
+
+            let cni_sock_path = Path::new("/var/run/pmz/cni.sock");
+            let cni_stream = UnixStream::connect(cni_sock_path).await?;
+
+            let (mut sender, conn) = http1::handshake(TokioIo::new(cni_stream)).await?;
+            tokio::spawn(async move {
+                if let Err(e) = conn.await {
+                    error!("connection failed: {e:#?}");
+                }
+            });
+
+            let add_event = CniAddEvent {
+                netns: netns.to_owned(),
+                pod_name: pod_name.to_owned(),
+                pod_namespace: namespace.to_owned(),
+                ips,
+            };
+
+            let json_string = serde_json::to_string(&add_event)?;
+            let req_body = Full::new(Bytes::from(json_string));
+            let req = http::Request::builder()
+                .method(http::Method::POST)
+                .uri("/")
+                .body(req_body)?;
+
+            let _ = sender.send_request(req).await?;
+
+            if let Some(result) = output {
+                println!("{}", result);
+            } else {
+                println!("{{}}")
+            }
         }
         _ => {}
     }

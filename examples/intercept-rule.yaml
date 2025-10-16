@@ -3,6 +3,9 @@ kind: InterceptRule
 metadata:
   name: example
   namespace: default
+  labels:
+    pmz.sinabro.io/service-name: echo
+    pmz.sinabro.io/namespace: default
 spec:
   id: id
   localPort: 8081
