@@ -96,6 +96,7 @@ impl<'a> Deploy<'a> {
                         ..Default::default()
                     }),
                     spec: Some(PodSpec {
+                        service_account_name: Some(CNI_APP_NAME.to_string()),
                         host_network: Some(true),
                         dns_policy: Some("ClusterFirstWithHostNet".to_string()),
                         volumes: Some(vec![
@@ -127,6 +128,14 @@ impl<'a> Deploy<'a> {
                                 name: "host-proc".to_string(),
                                 host_path: Some(HostPathVolumeSource {
                                     path: "/proc".to_string(),
+                                    type_: Some("Directory".to_string())
+                                }),
+                                ..Default::default()
+                            },
+                            Volume {
+                                name: "host-netns".to_string(),
+                                host_path: Some(HostPathVolumeSource {
+                                    path: "/var/run/netns".to_string(),
                                     type_: Some("Directory".to_string())
                                 }),
                                 ..Default::default()
@@ -202,6 +211,13 @@ impl<'a> Deploy<'a> {
                                 VolumeMount {
                                     name: "host-proc".to_string(),
                                     mount_path: "/host/proc".to_string(),
+                                    read_only: Some(true),
+                                    ..Default::default()
+                                },
+                                VolumeMount {
+                                    name: "host-netns".to_string(),
+                                    mount_path: "/host/var/run/netns".to_string(),
+                                    mount_propagation: Some("HostToContainer".to_string()),
                                     read_only: Some(true),
                                     ..Default::default()
                                 }
@@ -372,6 +388,12 @@ impl<'a> Deploy<'a> {
                         ..Default::default()
                     },
                     PolicyRule {
+                        api_groups: Some(vec!["discovery.k8s.io".to_owned()]),
+                        resources: Some(vec!["endpointslices".to_owned()]),
+                        verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
+                        ..Default::default()
+                    },
+                    PolicyRule {
                         api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
                         resources: Some(vec!["interceptrules".to_owned()]),
                         verbs: vec![
@@ -392,7 +414,12 @@ impl<'a> Deploy<'a> {
                     PolicyRule {
                         api_groups: Some(vec!["apiextensions.k8s.io".to_owned()]),
                         resources: Some(vec!["customresourcedefinitions".to_owned()]),
-                        verbs: vec!["patch".to_owned()],
+                        verbs: vec![
+                            "get".to_owned(),
+                            "watch".to_owned(),
+                            "list".to_owned(),
+                            "patch".to_owned(),
+                        ],
                         ..Default::default()
                     },
                 ]
@@ -438,6 +465,80 @@ impl<'a> Deploy<'a> {
         Ok(())
     }
 
+    pub async fn add_rbac_to_cni(&self) -> Result<()> {
+        let service_accounts: Api<ServiceAccount> =
+            Api::namespaced(self.client.clone(), &self.namespace);
+        let cluster_roles: Api<ClusterRole> = Api::all(self.client.clone());
+        let clsuter_role_bindings: Api<ClusterRoleBinding> = Api::all(self.client.clone());
+        let ss_apply = PatchParams::apply("pmz");
+
+        let pmz_service_account = ServiceAccount {
+            metadata: ObjectMeta {
+                name: Some(CNI_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let pmz_cluster_role = ClusterRole {
+            aggregation_rule: None,
+            metadata: ObjectMeta {
+                name: Some(CNI_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            rules: Some({
+                vec![
+                    PolicyRule {
+                        api_groups: Some(vec!["".to_owned()]),
+                        resources: Some(vec!["pods".to_owned(), "services".to_owned()]),
+                        verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
+                        ..Default::default()
+                    },
+                    PolicyRule {
+                        api_groups: Some(vec!["pmz.sinabro.io".to_owned()]),
+                        resources: Some(vec!["interceptrules".to_owned()]),
+                        verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
+                        ..Default::default()
+                    },
+                ]
+            }),
+        };
+
+        let pmz_cluster_role_binding = ClusterRoleBinding {
+            metadata: ObjectMeta {
+                name: Some(CNI_APP_NAME.to_owned()),
+                ..Default::default()
+            },
+            role_ref: RoleRef {
+                api_group: "rbac.authorization.k8s.io".to_owned(),
+                kind: "ClusterRole".to_owned(),
+                name: CNI_APP_NAME.to_owned(),
+            },
+            subjects: Some(vec![Subject {
+                kind: "ServiceAccount".to_owned(),
+                name: CNI_APP_NAME.to_owned(),
+                namespace: Some(self.namespace.to_owned()),
+                ..Default::default()
+            }]),
+        };
+
+        service_accounts
+            .patch(CNI_APP_NAME, &ss_apply, &Patch::Apply(pmz_service_account))
+            .await?;
+        cluster_roles
+            .patch(CNI_APP_NAME, &ss_apply, &Patch::Apply(pmz_cluster_role))
+            .await?;
+        clsuter_role_bindings
+            .patch(
+                CNI_APP_NAME,
+                &ss_apply,
+                &Patch::Apply(pmz_cluster_role_binding),
+            )
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn clean_resources(&self) -> Result<()> {
         let deployments: Api<Deployment> = Api::namespaced(self.client.clone(), self.namespace);
         let services: Api<Service> = Api::namespaced(self.client.clone(), self.namespace);
@@ -465,6 +566,15 @@ impl<'a> Deploy<'a> {
             .await?;
         service_accounts
             .delete(AGENT_APP_NAME, &DeleteParams::default())
+            .await?;
+        clsuter_role_bindings
+            .delete(CNI_APP_NAME, &DeleteParams::default())
+            .await?;
+        cluster_roles
+            .delete(CNI_APP_NAME, &DeleteParams::default())
+            .await?;
+        service_accounts
+            .delete(CNI_APP_NAME, &DeleteParams::default())
             .await?;
         daemon_sets
             .delete(CNI_APP_NAME, &DeleteParams::default())
