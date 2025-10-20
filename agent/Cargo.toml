@@ -23,8 +23,9 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net"
 
 clap = { workspace = true, features = ["derive"] }
 
-kube = { version = "0.98", features = ["runtime", "client", "derive"] }
-k8s-openapi = { version = "0.24", features = ["latest"] }
+kube = { version = "2.0", features = ["runtime", "client", "derive"] }
+k8s-openapi = { version = "0.26", features = ["latest"] }
+schemars = { version = "1.0.4", features = ["chrono04"] }
 hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["full"] }
 futures-util = { version = "0.3", default-features = false }
@@ -37,12 +38,10 @@ rustls-pemfile = "2.2.0"
 rustls = "0.23.20"
 tokio-rustls = "0.26"
 tokio-stream = "0.1"
-tonic = "0.13"
+tonic = "0.14"
 hyper-rustls = "0.27.4"
 h2 = "0.4.7"
 udp-stream = "0.0.12"
 uuid = { version = "1.16.0", features = ["v7"] }
 thiserror = "2.0.12"
 futures = "0.3.31"
-schemars = { version = "0.8.22", features = ["chrono"] }
-
