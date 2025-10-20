@@ -12,11 +12,11 @@ proto = { package = "proto", path = "../proto"}
 ctrl = { package = "agent", path = "../agent" }
 
 anyhow = { workspace = true, default-features = true }
-env_logger = { workspace = true }
-libc = { workspace = true }
-log = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-std", "fs"] }
 clap = { workspace = true, features = ["derive"] }
+libc = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-std", "fs"] }
+tracing = { workspace = true, features = ["attributes", "std"] }
+tracing-subscriber = { workspace = true, features = ["ansi", "fmt", "smallvec", "std", "tracing-log", "env-filter"] }
 
 chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
@@ -34,6 +34,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-stream = "0.1"
 tonic = "0.13"
+tracing-appender = "0.2"
 socket2 = { version = "0.6", features = ["all"] }
 
 [dev-dependencies]

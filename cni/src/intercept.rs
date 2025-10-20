@@ -1,5 +1,4 @@
 use anyhow::Result;
-use log::{debug, error, info};
 use rsln::{netlink::Netlink, types::addr::AddrFamily};
 use socket2::SockRef;
 use std::{
@@ -9,12 +8,14 @@ use std::{
     sync::Arc,
 };
 use tokio::{fs::File, io::AsyncWriteExt, net::TcpStream};
+use tracing::{Instrument, debug, error, info, instrument};
 
 use crate::netns::InpodNetns;
 
 const PROXY_LISTENER_PORT: u16 = 18325;
 const INTERCEPT_GATE_ADDR: &str = "127.0.0.1:18326";
 
+#[instrument(name = "inpod_redirection", skip_all, fields(%pod_ip))]
 pub async fn setup_inpod_redirection(
     pod_ip: IpAddr,
     current_netns: Arc<OwnedFd>,
@@ -32,6 +33,7 @@ pub async fn setup_inpod_redirection(
     Ok(())
 }
 
+#[instrument(skip_all, err)]
 async fn resolve_target_netns(
     pod_ip: IpAddr,
     current_netns: Arc<OwnedFd>,
@@ -77,6 +79,7 @@ async fn resolve_target_netns(
     Ok(matched_netns)
 }
 
+#[instrument(skip_all, err)]
 async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], PROXY_LISTENER_PORT));
 
@@ -84,7 +87,7 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
         match setup_inpod_iptables_rule(addr) {
             Ok(_) => {}
             Err(e) => {
-                error!("Failed to set up in-pod iptables rule: {:?}", e);
+                error!(error = ?e, "Failed to set up in-pod iptables rule");
             }
         }
         Ok(tokio::net::TcpSocket::new_v4())
@@ -98,24 +101,29 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
     // SockRef::from(&listener).set_ip_transparent_v4(true)?;
     // let listener = SockRef::from(&listener);
 
-    tokio::spawn(async move {
-        loop {
-            match listener.accept().await {
-                Ok((inbound_stream, remote_addr)) => {
-                    debug!("Accepted new connection from {:?}", remote_addr);
-                    tokio::spawn(proxy_connection(inbound_stream));
-                }
-                Err(e) => {
-                    error!("Failed to accept connection: {:?}", e)
+    tokio::spawn(
+        async move {
+            loop {
+                match listener.accept().await {
+                    Ok((inbound_stream, remote_addr)) => {
+                        tokio::spawn(
+                            proxy_connection(inbound_stream, remote_addr).in_current_span(),
+                        );
+                    }
+                    Err(e) => {
+                        error!("Failed to accept connection: {:?}", e)
+                    }
                 }
             }
         }
-    });
+        .in_current_span(),
+    );
 
     Ok(())
 }
 
-async fn proxy_connection(mut inbound_stream: tokio::net::TcpStream) {
+#[instrument(skip_all, fields(%remote_addr))]
+async fn proxy_connection(mut inbound_stream: tokio::net::TcpStream, remote_addr: SocketAddr) {
     let socket_ref = SockRef::from(&inbound_stream);
     let original_dst = match socket_ref.original_dst_v4() {
         Ok(addr) => addr.as_socket().unwrap(),
@@ -160,11 +168,12 @@ async fn proxy_connection(mut inbound_stream: tokio::net::TcpStream) {
     }
 }
 
+#[instrument(skip_all, fields(%target_ip))]
 fn has_local_ip_address(target_ip: IpAddr) -> Result<bool> {
     let mut netlink = Netlink::new();
     let addrs = netlink.addr_list_all(AddrFamily::All)?;
     debug!(
-        "has_local_ip_address is called: {:?}",
+        "netlink.addr_list_all: {:?}",
         addrs.iter().map(|a| a.ip.to_string()).collect::<String>()
     );
 
@@ -174,8 +183,8 @@ fn has_local_ip_address(target_ip: IpAddr) -> Result<bool> {
         .any(|ip| ip == target_ip))
 }
 
+#[instrument(skip_all, fields(%addr))]
 fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
-    info!("Setting up in-pod iptables rules.");
     let proxy_port_str = addr.port().to_string();
     let intercept_chain = "PMZ_INTERCEPT";
     let conn_mark = "1337";

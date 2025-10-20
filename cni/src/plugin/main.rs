@@ -1,38 +1,36 @@
-use std::{collections::HashMap, io::Write, path::Path};
+use std::{collections::HashMap, path::Path};
 
 use anyhow::Result;
 use cni::{CniAddEvent, CniConfig, CniResult};
 use http_body_util::Full;
 use hyper::{body::Bytes, client::conn::http1};
 use hyper_util::rt::TokioIo;
-use log::{debug, error};
 use tokio::{io::AsyncReadExt, net::UnixStream};
+use tracing::{Instrument, debug, error, info, info_span};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .write(true)
-        .open("/var/log/pmz-cni.log")?;
-    let log_file = Box::new(file);
-    env_logger::Builder::new()
-        .target(env_logger::Target::Pipe(log_file))
-        .filter(None, log::LevelFilter::Debug)
-        .format(|buf, record| {
-            writeln!(
-                buf,
-                "{} [{}] {}: {}",
-                chrono::Local::now(),
-                record.level(),
-                record.module_path().unwrap_or("<unknown>"),
-                record.args()
-            )
-        })
+    let file_appender = tracing_appender::rolling::never("/var/log", "pmz-cni.log");
+    let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt::layer().with_writer(non_blocking))
         .init();
 
+    let top_span = info_span!(
+        "cni",
+        cni.command = tracing::field::Empty,
+        k8s.pod.name = tracing::field::Empty,
+        k8s.pod.namespace = tracing::field::Empty,
+        cni.netns = tracing::field::Empty,
+    );
+    let _enter = top_span.enter();
+
     let cmd = std::env::var("CNI_COMMAND")?;
-    debug!("command: {cmd:?}");
+    tracing::Span::current().record("cni.command", &cmd);
+
+    info!("CNI command started");
 
     match cmd.as_str() {
         "ADD" => {
@@ -43,6 +41,11 @@ async fn main() -> Result<()> {
 
             let namespace = cni_args_map.get("K8S_POD_NAMESPACE").unwrap();
             let pod_name = cni_args_map.get("K8S_POD_NAME").unwrap();
+
+            tracing::Span::current()
+                .record("k8s.pod.name", &pod_name)
+                .record("k8s.pod.namespace", &namespace)
+                .record("cni.netns", &netns);
 
             let mut buf = vec![];
             tokio::io::stdin().read_to_end(&mut buf).await?;
@@ -56,19 +59,24 @@ async fn main() -> Result<()> {
                 conf.prev_result = Some(prev_result);
             }
 
-            debug!("{namespace:?}/{pod_name:?} (ADD) netns {netns:?}, netdev {netdev:?}: {conf:?}");
+            debug!(?netdev, ?conf, "Processing ADD command");
 
             let ips = conf.prev_result.and_then(|r| r.ips).unwrap();
 
             let cni_sock_path = Path::new("/var/run/pmz/cni.sock");
+            info!(path = %cni_sock_path.display(), "Connecting to CNI daemon socket");
             let cni_stream = UnixStream::connect(cni_sock_path).await?;
 
             let (mut sender, conn) = http1::handshake(TokioIo::new(cni_stream)).await?;
-            tokio::spawn(async move {
-                if let Err(e) = conn.await {
-                    error!("connection failed: {e:#?}");
+
+            tokio::spawn(
+                async move {
+                    if let Err(e) = conn.await {
+                        error!(error = ?e, "CNI daemon connection failed");
+                    }
                 }
-            });
+                .instrument(tracing::debug_span!("cni_daemon_connection")),
+            );
 
             let add_event = CniAddEvent {
                 netns: netns.to_owned(),
@@ -84,6 +92,7 @@ async fn main() -> Result<()> {
                 .uri("/")
                 .body(req_body)?;
 
+            info!("Sending ADD event to daemon");
             let _ = sender.send_request(req).await?;
 
             if let Some(result) = output {
@@ -92,7 +101,9 @@ async fn main() -> Result<()> {
                 println!("{{}}")
             }
         }
-        _ => {}
+        _ => {
+            debug!("Ignoring CNI command");
+        }
     }
 
     Ok(())

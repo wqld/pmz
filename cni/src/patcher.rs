@@ -1,9 +1,9 @@
 use anyhow::{Result, anyhow};
-use log::{error, info};
 use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
+use tracing::{error, info, instrument};
 
 use serde::{Deserialize, Serialize};
 
@@ -29,15 +29,14 @@ impl CniPatcher {
         }
     }
 
+    #[instrument(skip_all, fields(conf_dir = %self.conf_dir.display()))]
     pub async fn patch(&self) -> Result<()> {
-        info!("Searching for CNI configuration in {:?}", self.conf_dir);
-
         if let Some(conflist_path) = self.find_primary_conflist().await? {
-            info!("Found CNI config: {:?}. Patching...", conflist_path);
+            info!(path = ?conflist_path, "Found primary CNI config, starting patch");
             Self::update_conflist_file(&conflist_path).await?;
             info!("Successfully patched CNI configuration.");
         } else {
-            error!("No valid CNI .conflist file found in {:?}.", self.conf_dir);
+            error!(path = %self.conf_dir.display(), "No valid CNI .conflist file found.");
         }
         Ok(())
     }

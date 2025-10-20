@@ -1,8 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
+    fmt::{self, Display, Formatter},
     sync::Arc,
 };
 
+use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::RwLock;
@@ -102,6 +104,21 @@ pub struct CniAddEvent {
 pub struct NamespacedName {
     pub name: String,
     pub namespace: String,
+}
+
+impl From<&k8s_openapi::api::core::v1::Service> for NamespacedName {
+    fn from(svc: &k8s_openapi::api::core::v1::Service) -> Self {
+        Self {
+            name: svc.name_any(),
+            namespace: svc.namespace().unwrap_or_default(),
+        }
+    }
+}
+
+impl Display for NamespacedName {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.name)
+    }
 }
 
 pub type ServiceIndex = Arc<RwLock<HashMap<String, HashSet<NamespacedName>>>>;

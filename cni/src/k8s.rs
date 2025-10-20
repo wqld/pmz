@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use cni::{NamespacedName, ServiceIndex};
@@ -6,122 +9,148 @@ use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{
     Api, Client, ResourceExt,
-    runtime::{WatchStreamExt, reflector, watcher},
+    runtime::{
+        WatchStreamExt,
+        reflector::{self, ObjectRef, Store, store::Writer},
+        watcher,
+    },
 };
-use log::{debug, warn};
-use tokio::task::JoinHandle;
+use tokio::sync::RwLock;
+use tracing::{debug, info, instrument, warn};
 
-pub async fn setup_service_watcher(
-    service_index: ServiceIndex,
-) -> Result<(JoinHandle<()>, reflector::Store<Service>)> {
-    let client = Client::try_default().await?;
-    let service_api: Api<Service> = Api::all(client.clone());
-    let (service_store, service_writer) = reflector::store();
-    let mut service_reflector = reflector::reflector(
-        service_writer,
-        watcher(service_api, watcher::Config::default()),
-    )
-    .default_backoff()
-    .boxed();
-
-    let handle = tokio::spawn(async move {
-        while let Some(Ok(event)) = service_reflector.next().await {
-            if let Err(e) = handle_service_event(event, &service_index.clone()).await {
-                warn!("Failed to handle service event: {:?}", e);
-            }
-        }
-    });
-
-    Ok((handle, service_store))
+pub struct ServiceWatcher {
+    client: Client,
+    store: Store<Service>,
+    writer: Writer<Service>,
+    index: ServiceIndex,
 }
 
-async fn handle_service_event(
-    event: watcher::Event<Service>,
-    service_index: &ServiceIndex,
-) -> Result<()> {
-    match event {
-        watcher::Event::Apply(svc) | watcher::Event::InitApply(svc) => {
-            let ns_name = NamespacedName {
-                name: svc.name_any(),
-                namespace: svc.namespace().unwrap_or_default(),
-            };
+impl ServiceWatcher {
+    pub fn new(client: Client) -> Self {
+        let index = Arc::new(RwLock::new(HashMap::new()));
+        let (store, writer) = reflector::store();
 
-            let mut index = service_index.write().await;
-
-            // TODO: Consider removing old selectors if service is updated.
-            // get the previous selector from the store(reader) and remove the previous index
-            // let svc_ref = reflector::ObjectRef::from_obj(&svc);
-
-            // svc_store_for_reflector.wait_until_ready().await.unwrap();
-            // if let Some(old_svc) = svc_store_for_reflector.get(&svc_ref) {
-            //     if let Some(selector) =
-            //         old_svc.spec.as_ref().and_then(|s| s.selector.as_ref())
-            //     {
-            //         debug!("Previous selector: {selector:?}");
-            //         for (k, v) in selector {
-            //             let label_key = format!("{k}={v}");
-            //             index.entry(label_key).or_default().remove(&namespace_name);
-            //         }
-            //     }
-            // }
-
-            if let Some(selector) = svc.spec.as_ref().and_then(|s| s.selector.as_ref()) {
-                debug!(
-                    "Indexing service {:?} with selector {:?}",
-                    ns_name, selector
-                );
-                // let mut index = svc_index_for_reflector.write().await;
-                for (k, v) in selector {
-                    let label_key = format!("{k}={v}");
-                    index.entry(label_key).or_default().insert(ns_name.clone());
-                }
-            }
+        Self {
+            client,
+            store,
+            writer,
+            index,
         }
-        watcher::Event::Delete(svc) => {
-            // TODO: Implement deletion logic to clean up the index.
-            debug!("Service deleted: {:?}", svc.name_any());
-        }
-        _ => {}
     }
 
-    Ok(())
+    pub fn store(&self) -> reflector::Store<Service> {
+        self.store.clone()
+    }
+
+    pub fn index(&self) -> ServiceIndex {
+        self.index.clone()
+    }
+
+    #[instrument(name = "watcher", skip_all, err)]
+    pub async fn run(self) -> Result<()> {
+        let api: Api<Service> = Api::all(self.client);
+
+        let mut reflector =
+            reflector::reflector(self.writer, watcher(api, watcher::Config::default()))
+                .default_backoff()
+                .boxed();
+
+        info!("Service reflector started.");
+
+        while let Some(event) = reflector.next().await {
+            match event {
+                Ok(event) => Self::handle_event(event, &self.store, &self.index).await,
+                Err(e) => warn!(error = ?e, "Watcher stream produced an error"),
+            }
+        }
+
+        Ok(())
+    }
+
+    #[instrument(
+        skip_all,
+        fields(event_type = tracing::field::Empty)
+    )]
+    async fn handle_event(
+        event: watcher::Event<Service>,
+        store: &Store<Service>,
+        index: &ServiceIndex,
+    ) {
+        let event_type = match &event {
+            watcher::Event::Apply(_) => "Apply",
+            watcher::Event::InitApply(_) => "InitApply",
+            watcher::Event::Delete(_) => "Delete",
+            watcher::Event::Init => "Init",
+            watcher::Event::InitDone => "InitDone",
+        };
+        tracing::Span::current().record("event_type", &event_type);
+
+        let mut index = index.write().await;
+
+        match event {
+            watcher::Event::Apply(svc) | watcher::Event::InitApply(svc) => {
+                let ns_name = NamespacedName::from(&svc);
+                let svc_ref = ObjectRef::from_obj(&svc);
+
+                if let Some(old_svc) = store.get(&svc_ref) {
+                    if let Some(selector) = old_svc.spec.as_ref().and_then(|s| s.selector.as_ref())
+                    {
+                        debug!(service = %ns_name, "Removing old indexes for updated service");
+                        for (k, v) in selector {
+                            let label_key = format!("{k}={v}");
+                            if let Some(services) = index.get_mut(&label_key) {
+                                services.remove(&ns_name);
+                                if services.is_empty() {
+                                    index.remove(&label_key);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if let Some(selector) = svc.spec.as_ref().and_then(|s| s.selector.as_ref()) {
+                    debug!(service = %ns_name, ?selector, "Applying new indexes for service");
+                    for (k, v) in selector {
+                        let label_key = format!("{k}={v}");
+                        index.entry(label_key).or_default().insert(ns_name.clone());
+                    }
+                }
+            }
+            watcher::Event::Delete(svc) => {
+                let ns_name = NamespacedName::from(&svc);
+                if let Some(selector) = svc.spec.as_ref().and_then(|s| s.selector.as_ref()) {
+                    debug!(service = %ns_name, "Deleting indexes for service");
+                    for (k, v) in selector {
+                        let label_key = format!("{k}={v}");
+                        if let Some(services) = index.get_mut(&label_key) {
+                            services.remove(&ns_name);
+                            if services.is_empty() {
+                                index.remove(&label_key);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
+#[instrument(
+    skip_all,
+    err,
+    fields(
+        pod_name = %pod.name_any()
+    )
+)]
 pub async fn find_services_for_pod(
     pod: &Pod,
     svc_index: ServiceIndex,
-    svc_store: reflector::Store<Service>,
+    svc_store: Store<Service>,
 ) -> Result<Vec<Arc<Service>>> {
-    debug!("Try to find services for pod {}", pod.name_any());
     svc_store.wait_until_ready().await?;
     let pod_labels = pod.labels();
     let index = svc_index.read().await;
-
-    // let candidate_ns_names: Vec<NamespacedName> = {
-    //     debug!("Read lock for service index - a");
-    //     let index = svc_index.read().await;
-    //     debug!("Read lock for service index");
-
-    //     pod_labels
-    //         .iter()
-    //         .map(|(k, v)| format!("{k}={v}"))
-    //         .filter_map(|k| index.get(&k))
-    //         .flatten()
-    //         .cloned()
-    //         .collect()
-    // };
-
-    // debug!(
-    //     "Found {} candidate namespaced names.",
-    //     candidate_ns_names.len()
-    // );
-
-    // Ok(candidate_ns_names
-    //     .into_iter()
-    //     .map(|nn| reflector::ObjectRef::<Service>::new(&nn.name).within(&nn.namespace))
-    //     .filter_map(|obj_ref| svc_store.get(&obj_ref))
-    //     .filter(|svc| selector_matches(svc, pod_labels))
-    //     .collect::<Vec<_>>())
 
     Ok(pod_labels
         .iter()

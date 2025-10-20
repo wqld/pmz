@@ -18,11 +18,11 @@ use hyper::{
 use hyper_util::rt::TokioIo;
 use k8s_openapi::api::core::v1::{Pod, Service};
 use kube::{Api, Client, ResourceExt, api::ListParams, runtime::reflector::Store};
-use log::{debug, error, info};
 use tokio::{
     fs::{File, create_dir_all, remove_file, set_permissions},
     net::UnixListener,
 };
+use tracing::{Instrument, debug, error, info, instrument};
 
 use crate::{config::Config, intercept::setup_inpod_redirection, k8s};
 
@@ -41,6 +41,12 @@ impl CniServer {
         }
     }
 
+    #[instrument(
+        name = "server",
+        skip_all,
+        err,
+        fields(socket_path = %self.config.cni_socket_path)
+    )]
     pub async fn run(&self) -> Result<()> {
         let path = Path::new(&self.config.cni_socket_path);
 
@@ -55,29 +61,44 @@ impl CniServer {
         let listener = UnixListener::bind(path)?;
         set_permissions(path, Permissions::from_mode(0o700)).await?;
 
-        info!("CNI server listening on {}", self.config.cni_socket_path);
+        info!("CNI server listening");
 
         loop {
             let (stream, _) = listener.accept().await?;
             let service_index = self.service_index.clone();
             let service_store = self.service_store.clone();
 
-            tokio::spawn(async move {
-                if let Err(e) = http1::Builder::new()
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(move |req| {
-                            Self::handle_request(req, service_index.clone(), service_store.clone())
-                        }),
-                    )
-                    .await
-                {
-                    error!("Error serving connection: {e:#?}");
+            tokio::spawn(
+                async move {
+                    if let Err(e) = http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |req| {
+                                Self::handle_request(
+                                    req,
+                                    service_index.clone(),
+                                    service_store.clone(),
+                                )
+                            }),
+                        )
+                        .await
+                    {
+                        error!(error = ?e, "Error serving connection");
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
     }
 
+    #[instrument(
+        skip_all,
+        err,
+        fields(
+            pod_name = tracing::field::Empty,
+            namespace = tracing::field::Empty
+        )
+    )]
     async fn handle_request(
         req: Request<Incoming>,
         svc_index: ServiceIndex,
@@ -85,12 +106,13 @@ impl CniServer {
     ) -> Result<Response<Full<Bytes>>> {
         let body = req.collect().await?.aggregate();
         let event: CniAddEvent = serde_json::from_reader(body.reader())?;
-        debug!(
-            "Received a Pod creation event from the CNI Plugin: {:?}",
-            event
-        );
 
-        // retreive intercept rule
+        tracing::Span::current()
+            .record("pod.name", &event.pod_name.as_str())
+            .record("pod.namespace", &event.pod_namespace.as_str());
+
+        debug!("Received CNI ADD event");
+
         let pod_name = event.pod_name;
         let namespace = event.pod_namespace;
 
@@ -104,8 +126,8 @@ impl CniServer {
         let mut intercept_rules = vec![];
 
         debug!(
-            "Found {} services. Now searching for intercept rules",
-            services.len()
+            services = services.len(),
+            "Now searching for intercept rules"
         );
 
         for svc in services {
@@ -122,13 +144,16 @@ impl CniServer {
         }
 
         if !intercept_rules.is_empty() {
-            debug!("There are {} intercept rules", intercept_rules.len());
+            debug!(
+                count = intercept_rules.len(),
+                "Found matching intercept rules"
+            );
+
             let self_netns_path = "/proc/self/ns/net";
             let current_netns = File::open(self_netns_path).await?;
             let current_netns: Arc<OwnedFd> = Arc::new(current_netns.into_std().await.into());
 
             for ip_config in event.ips {
-                // let pod_ip = ip_config.address.parse()?;
                 let addr_str = ip_config.address.split('/').next().unwrap_or_default();
                 let pod_ip = addr_str.parse()?;
                 let target_netns_path = format!("/host{}", event.netns);
