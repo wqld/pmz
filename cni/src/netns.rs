@@ -1,7 +1,7 @@
 use anyhow::Result;
-use log::{debug, error};
 use nix::sched::{CloneFlags, setns};
 use std::{os::fd::OwnedFd, sync::Arc};
+use tracing::{error, instrument};
 
 #[derive(Debug)]
 struct NetnsInner {
@@ -20,6 +20,7 @@ impl InpodNetns {
         }
     }
 
+    #[instrument(name = "run_in_ns", skip_all, level = "debug", err)]
     pub fn run<F, T>(&self, f: F) -> Result<T>
     where
         F: FnOnce() -> Result<T>,
@@ -29,7 +30,6 @@ impl InpodNetns {
     }
 
     fn enter(&self) -> Result<NamespaceGuard> {
-        debug!("Try to use 'setns'");
         setns(&self.inner.target, CloneFlags::CLONE_NEWNET)
             .map_err(|e| std::io::Error::from_raw_os_error(e as i32))?;
 
@@ -45,9 +45,8 @@ struct NamespaceGuard {
 
 impl Drop for NamespaceGuard {
     fn drop(&mut self) {
-        debug!("Drop The Namespace!");
         if let Err(e) = setns(&self.current, CloneFlags::CLONE_NEWNET) {
-            error!("Failed to restore original network namespace: {e}");
+            error!(error = ?e, "Failed to restore original network namespace");
         }
     }
 }

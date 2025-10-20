@@ -1,13 +1,11 @@
-use std::{collections::HashMap, sync::Arc};
-
 use anyhow::Result;
 use clap::Parser;
-use cni::ServiceIndex;
 
-use log::{error, info};
-use tokio::sync::RwLock;
+use kube::Client;
+use tracing::{error, info};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::{patcher::CniPatcher, server::CniServer};
+use crate::{discovery::Discovery, k8s::ServiceWatcher, patcher::CniPatcher, server::CniServer};
 
 mod config;
 mod discovery;
@@ -29,48 +27,44 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt::layer().with_writer(non_blocking))
+        .init();
 
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
 
     let config = config::Config::load()?;
-    let service_index: ServiceIndex = Arc::new(RwLock::new(HashMap::new()));
+    let client = Client::try_default().await?;
 
     let patcher = CniPatcher::new(&config.cni_conf_dir);
-    let discovery_handle = discovery::run(config.clone()).await?;
-    let (watcher_handle, service_store) = k8s::setup_service_watcher(service_index.clone()).await?;
-    let cni_server = CniServer::new(config, service_index.clone(), service_store.clone());
-    let server_future = cni_server.run();
+    let discovery = Discovery::new(config.clone());
+    let service_watcher = ServiceWatcher::new(client.clone());
+    let cni_server = CniServer::new(
+        config.clone(),
+        service_watcher.index(),
+        service_watcher.store(),
+    );
 
-    // update the existing CNI configuration to enable the invocation of pmz-cni via chaining
     patcher.patch().await?;
+
+    let discovery_future = discovery.run();
+    let server_future = cni_server.run();
+    let watcher_future = service_watcher.run();
 
     info!("All components are running concurrently.");
 
     tokio::select! {
-        res = discovery_handle => {
-            error!("Discovery client task has terminated unexpectedly.");
-            if let Err(e) = res {
-                error!("JoinError from discovery task: {:?}", e);
-            }
-        }
-        res = watcher_handle => {
-            error!("Kubernetes service watcher task has terminated unexpectedly.");
-            if let Err(e) = res {
-                error!("JoinError from watcher task: {:?}", e);
-            }
-        }
-        res = server_future => {
-            error!("CNI server task has terminated unexpectedly.");
-            if let Err(e) = res {
-                error!("Error from server task: {:?}", e);
-            }
-        }
+        _ = discovery_future => error!("Discovery client task has terminated."),
+        _ = watcher_future => error!("Kubernetes service watcher task has terminated."),
+        _ = server_future => error!("CNI server task has terminated."),
+
     }
 
-    info!("PMZ CNI Agent is shutting down due to a critical task failure.");
+    info!("PMZ CNI is shutting down due to a critical task failure.");
 
     Ok(())
 }
