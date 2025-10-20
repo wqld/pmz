@@ -10,9 +10,9 @@ pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 #[derive(CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq, Hash)]
 #[kube(
-    kind = "InterceptRule",
     group = "pmz.sinabro.io",
     version = "v1alpha1",
+    kind = "InterceptRule",
     shortname = "irs",
     namespaced
 )]

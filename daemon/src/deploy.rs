@@ -584,10 +584,10 @@ impl<'a> Deploy<'a> {
     }
 
     fn generate_self_signed() -> Result<(String, String)> {
-        let CertifiedKey { cert, key_pair } =
+        let CertifiedKey { cert, signing_key } =
             generate_simple_self_signed(vec!["localhost".to_string()])?;
 
-        Ok((cert.pem(), key_pair.serialize_pem()))
+        Ok((cert.pem(), signing_key.serialize_pem()))
     }
 
     fn build_label_map(key: &str, value: &str) -> BTreeMap<String, String> {
