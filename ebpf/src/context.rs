@@ -18,6 +18,7 @@ use network_types::{
 
 pub enum Kind {
     TC,
+    #[allow(dead_code)]
     XDP,
 }
 
@@ -90,8 +91,8 @@ where
 
         ctx.eth_hdr = ctx.ptr_at_mut(0)?;
 
-        match unsafe { (*ctx.eth_hdr).ether_type } {
-            EtherType::Ipv4 => {}
+        match unsafe { (*ctx.eth_hdr).ether_type() } {
+            Ok(EtherType::Ipv4) => {}
             _ => return Err("IPv4 is supported only."),
         }
 
@@ -100,8 +101,8 @@ where
         match unsafe { (*ctx.ip_hdr).proto } {
             IpProto::Udp => {
                 ctx.udp_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN)?;
-                ctx.proto = match (unsafe { *ctx.udp_hdr }).dest {
-                    13568 /* 53 */ => {
+                ctx.proto = match (unsafe { *ctx.udp_hdr }).dst_port() {
+                    53 => {
                         ctx.dns_hdr = ctx.ptr_at_mut(EthHdr::LEN + Ipv4Hdr::LEN + UdpHdr::LEN)?;
                         Some(Protocol::DNS)
                     }
@@ -132,23 +133,23 @@ where
         unsafe {
             mem::swap(&mut (*self.eth_hdr).src_addr, &mut (*self.eth_hdr).dst_addr);
             mem::swap(&mut (*self.ip_hdr).src_addr, &mut (*self.ip_hdr).dst_addr);
-            mem::swap(&mut (*self.udp_hdr).source, &mut (*self.udp_hdr).dest);
+            mem::swap(&mut (*self.udp_hdr).src, &mut (*self.udp_hdr).dst);
         }
     }
 
     pub fn ignore_udp_csum(&self) {
         let udp_len = self.len() as usize - EthHdr::LEN - Ipv4Hdr::LEN;
         unsafe {
-            (*self.udp_hdr).len = u16::to_be(udp_len as u16);
-            (*self.udp_hdr).check = 0;
+            (*self.udp_hdr).set_len(udp_len as u16);
+            (*self.udp_hdr).set_checksum(0);
         }
     }
 
     pub fn recompute_ip_csum(&self) {
         let ip_len = self.len() as usize - EthHdr::LEN;
         unsafe {
-            (*self.ip_hdr).tot_len = u16::to_be(ip_len as u16);
-            (*self.ip_hdr).check = self.compute_ip_csum(false);
+            (*self.ip_hdr).set_tot_len(ip_len as u16);
+            (*self.ip_hdr).set_checksum(self.compute_ip_csum(false));
         }
     }
 
@@ -158,11 +159,11 @@ where
 
         unsafe {
             if !verify {
-                (*self.ip_hdr).check = 0;
+                (*self.ip_hdr).set_checksum(0);
             }
 
             for _ in 0..(mem::size_of::<Ipv4Hdr>() >> 1) {
-                checksum += *next as u32;
+                checksum += u16::from_be(*next) as u32;
                 next = next.add(1);
             }
         }

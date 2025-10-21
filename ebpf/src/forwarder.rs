@@ -56,10 +56,19 @@ impl<'a> TrafficForwarder<'a> {
         };
 
         unsafe {
-            let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
+            let (src_addr, dst_addr) = (
+                u32::from_ne_bytes((*self.ip_hdr).src_addr),
+                u32::from_ne_bytes((*self.ip_hdr).dst_addr),
+            );
             let (src_port, dst_port) = match kind {
-                Protocol::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
-                Protocol::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                Protocol::TCP => (
+                    u16::from_ne_bytes((*self.tcp_hdr).source),
+                    u16::from_ne_bytes((*self.tcp_hdr).dest),
+                ),
+                Protocol::UDP => (
+                    u16::from_ne_bytes((*self.udp_hdr).src),
+                    u16::from_ne_bytes((*self.udp_hdr).dst),
+                ),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
@@ -85,10 +94,19 @@ impl<'a> TrafficForwarder<'a> {
                 _ => return Ok(TC_ACT_PIPE),
             };
 
-            let (src_addr, dst_addr) = ((*self.ip_hdr).src_addr, (*self.ip_hdr).dst_addr);
+            let (src_addr, dst_addr) = (
+                u32::from_ne_bytes((*self.ip_hdr).src_addr),
+                u32::from_ne_bytes((*self.ip_hdr).dst_addr),
+            );
             let (src_port, dst_port) = match proto {
-                Protocol::TCP => ((*self.tcp_hdr).source, (*self.tcp_hdr).dest),
-                Protocol::UDP => ((*self.udp_hdr).source, (*self.udp_hdr).dest),
+                Protocol::TCP => (
+                    u16::from_ne_bytes((*self.tcp_hdr).source),
+                    u16::from_ne_bytes((*self.tcp_hdr).dest),
+                ),
+                Protocol::UDP => (
+                    u16::from_ne_bytes((*self.udp_hdr).src),
+                    u16::from_ne_bytes((*self.udp_hdr).dst),
+                ),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
@@ -125,7 +143,7 @@ impl<'a> TrafficForwarder<'a> {
 
         let (port_offset, csum_offset) = match kind {
             Protocol::TCP => (offset_of!(TcpHdr, dest), offset_of!(TcpHdr, check)),
-            Protocol::UDP => (offset_of!(UdpHdr, dest), offset_of!(UdpHdr, check)),
+            Protocol::UDP => (offset_of!(UdpHdr, dst), offset_of!(UdpHdr, check)),
             _ => return Ok(TC_ACT_PIPE),
         };
 
@@ -213,7 +231,7 @@ impl<'a> TrafficForwarder<'a> {
 
             let (port_offset, csum_offset) = match kind {
                 Protocol::TCP => (offset_of!(TcpHdr, source), offset_of!(TcpHdr, check)),
-                Protocol::UDP => (offset_of!(UdpHdr, source), offset_of!(UdpHdr, check)),
+                Protocol::UDP => (offset_of!(UdpHdr, src), offset_of!(UdpHdr, check)),
                 _ => return Ok(TC_ACT_PIPE),
             };
 
