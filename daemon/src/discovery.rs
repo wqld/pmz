@@ -12,8 +12,8 @@ use kube::{
         watcher::{self, Event, watcher},
     },
 };
-use log::{debug, error, info};
 use tokio::sync::{RwLock, broadcast};
+use tracing::{debug, error, info, instrument};
 
 use crate::connect::ConnectionStatus;
 
@@ -26,6 +26,7 @@ impl Discovery {
         Self { service_registry }
     }
 
+    #[instrument(name = "discovery", skip_all)]
     pub async fn watch(
         &self,
         client: kube::Client,
@@ -45,7 +46,7 @@ impl Discovery {
                 Some(next) = stream.next() => {
                     match next {
                         Ok(event) => self.handle_service_event(event).await?,
-                        Err(err) => error!("failed to get next event {err:?}"),
+                        Err(e) => error!(error = ?e, "failed to get next event"),
                     }
                 },
                 _ = shutdown.recv() => {
@@ -58,6 +59,7 @@ impl Discovery {
         }
     }
 
+    #[instrument(name = "handle", skip_all)]
     async fn handle_service_event(&self, event: Event<Service>) -> Result<()> {
         match event {
             watcher::Event::Apply(svc) | watcher::Event::InitApply(svc) => {
@@ -69,7 +71,7 @@ impl Discovery {
                     Ok(record) => record,
                     Err(_) => return Ok(()),
                 };
-                let dns_query = Self::create_dns_query(&name, &namespace).unwrap();
+                let dns_query = Self::create_dns_query(&name, &namespace);
 
                 let mut registry = self.service_registry.write().await;
                 registry.insert(dns_query, a_record, 0).unwrap();
@@ -81,7 +83,7 @@ impl Discovery {
                 let namespace = svc.namespace().unwrap_or_default();
                 let cluster_ip = svc.spec.unwrap().cluster_ip.unwrap_or_default();
 
-                let dns_query = Self::create_dns_query(&name, &namespace).unwrap();
+                let dns_query = Self::create_dns_query(&name, &namespace);
 
                 let mut registry = self.service_registry.write().await;
                 registry.remove(&dns_query).unwrap();
@@ -103,7 +105,7 @@ impl Discovery {
         })
     }
 
-    pub fn create_dns_query(name: &str, namespace: &str) -> Result<DnsQuery> {
+    pub fn create_dns_query(name: &str, namespace: &str) -> DnsQuery {
         let mut dns_name = [0u8; MAX_DNS_NAME_LENGTH];
         let combined = format!("{}.{}.svc", name, namespace);
         let bytes = combined.as_bytes();
@@ -111,11 +113,11 @@ impl Discovery {
 
         dns_name[..len].copy_from_slice(&bytes[..len]);
 
-        Ok(DnsQuery {
+        DnsQuery {
             record_type: 1,
             class: 1,
             name: dns_name,
-        })
+        }
     }
 
     async fn clean_registry(&self) -> Result<()> {

@@ -15,11 +15,11 @@ use kube::{
         watcher,
     },
 };
-use log::{debug, error, info, warn};
 use proto::{InterceptEndpoint, PodIdentifier};
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::sync::RwLock;
+use tracing::{debug, error, info, warn};
 
 use crate::DiscovertTx;
 
@@ -94,8 +94,8 @@ async fn try_reconcile(
 ) -> anyhow::Result<Action> {
     let services = Api::<Service>::namespaced(ctx.client.clone(), namespace);
 
-    let service_name = &rule.spec.service;
-    let requested_port = rule.spec.port;
+    let service_name = &rule.spec.r#match.service;
+    let requested_port = rule.spec.r#match.port;
 
     debug!(
         "Rule: {}/{}, Service: {}, Port: {}, Processing rule details",

@@ -4,13 +4,13 @@ use anyhow::{Context, Error, Result};
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::Api;
-use log::{debug, error, info};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
     sync::{RwLock, broadcast},
 };
 use tokio_stream::wrappers::TcpListenerStream;
+use tracing::{Instrument, debug, error, info, instrument};
 
 use crate::connect::ConnectionStatus;
 
@@ -31,6 +31,7 @@ impl Forward {
         }
     }
 
+    #[instrument(name = "forward", skip_all)]
     pub async fn start(
         &self,
         mut shutdown: broadcast::Receiver<()>,
@@ -40,9 +41,9 @@ impl Forward {
 
         let mut stream = match TcpListener::bind(addr).await {
             Ok(listener) => TcpListenerStream::new(listener),
-            Err(err) => {
-                ConnectionStatus::forward(&conn_stat, true, &err.to_string()).await;
-                return Err(Error::new(err));
+            Err(e) => {
+                ConnectionStatus::forward(&conn_stat, true, &e.to_string()).await;
+                return Err(Error::new(e));
             }
         };
 
@@ -54,11 +55,11 @@ impl Forward {
                 Some(next) = stream.next() => {
                     match next {
                         Ok(conn) => self.handle_connection(conn),
-                        Err(err) => error!("failed to get next connection: {err:?}"),
+                        Err(e) => error!(error = ?e, "Failed to get next connection"),
                     }
                 },
                 _ = shutdown.recv() => {
-                    debug!("forward shutdown");
+                    debug!("Forward shutdown");
                     ConnectionStatus::clear_forward(&conn_stat).await;
                     return Ok(())
                 }
@@ -66,23 +67,28 @@ impl Forward {
         }
     }
 
+    #[instrument(name = "handle", skip_all)]
     fn handle_connection(&self, mut conn: TcpStream) {
         if let Ok(peer_addr) = conn.peer_addr() {
-            debug!("new connection: {peer_addr}");
+            debug!("New connection: {peer_addr}");
         }
 
         let pods = self.pods.clone();
         let agent_name = self.agent_name.clone();
         let agent_port = self.agent_port;
-        tokio::spawn(async move {
-            if let Err(err) = forward_connection(&pods, &agent_name, agent_port, &mut conn).await {
-                error!("failed to forward connection: {err:?}");
+        tokio::spawn(
+            async move {
+                if let Err(e) = port_forward(&pods, &agent_name, agent_port, &mut conn).await {
+                    error!(error = ?e, "Failed to forward connection");
+                }
             }
-        });
+            .in_current_span(),
+        );
     }
 }
 
-async fn forward_connection(
+#[instrument(skip_all, fields(agent.name = %agent_name, agent.port = %agent_port))]
+async fn port_forward(
     pods: &Api<Pod>,
     agent_name: &str,
     agent_port: u16,
@@ -97,6 +103,6 @@ async fn forward_connection(
 
     drop(upstream_conn);
     forwarder.join().await?;
-    debug!("connection closed");
+    debug!("Connection closed");
     Ok(())
 }

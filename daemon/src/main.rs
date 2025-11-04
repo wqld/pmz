@@ -9,13 +9,14 @@ use clap::Parser;
 use command::Command;
 use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
 use connect::ConnectionStatus;
-use log::{debug, warn};
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
 use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
+use tracing::{debug, warn};
+use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod command;
 mod connect;
@@ -34,7 +35,11 @@ struct Opt {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    env_logger::init();
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt::layer().with_writer(non_blocking))
+        .init();
 
     PrivilegeLevel::escalate_if_needed()?;
 
@@ -48,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let ret = unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &rlim) };
     if ret != 0 {
-        debug!("remove limit on locked memory failed, ret is: {}", ret);
+        debug!(ret = ret, "Remove limit on locked memory failed");
     }
 
     // This will include your eBPF object file as raw bytes at compile-time and load it at
@@ -61,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
     )))?;
     if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
         // This can happen if you remove all log statements from your eBPF program.
-        warn!("failed to initialize eBPF logger: {}", e);
+        warn!(error = ?e, "Failed to initialize eBPF logger");
     }
     let Opt { iface } = opt;
     // error adding clsact to the interface if it is already added is harmless

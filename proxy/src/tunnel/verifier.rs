@@ -1,18 +1,18 @@
 use std::{path::Path, sync::Arc};
 
-use log::{debug, error};
 use rustls::{
+    CertificateError, SignatureScheme,
     client::{
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         verify_server_name,
     },
     crypto::{
-        aws_lc_rs, verify_tls12_signature, verify_tls13_signature, WebPkiSupportedAlgorithms,
+        WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature, verify_tls13_signature,
     },
-    pki_types::{pem::PemObject, CertificateDer, ServerName},
+    pki_types::{CertificateDer, ServerName, pem::PemObject},
     server::ParsedCertificate,
-    CertificateError, SignatureScheme,
 };
+use tracing::{debug, error};
 
 #[derive(Debug)]
 pub struct PmzCertVerifier {

@@ -5,19 +5,16 @@ use std::sync::Arc;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use ::ctrl::{InterceptRule, InterceptRuleSpec};
+use ::ctrl::{ForwardTo, InterceptRule, InterceptRuleSpec, Match};
 use ::proxy::tunnel;
 use ::proxy::tunnel::server::TunnelServer;
 use discovery::DiscoveryServer;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
-use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::api::{ListParams, Patch, PatchParams};
-use kube::runtime::wait::await_condition;
-use kube::runtime::{WatchStreamExt, conditions, watcher};
-use kube::{Api, CustomResourceExt, ResourceExt};
-use log::{debug, error};
+use kube::runtime::{WatchStreamExt, watcher};
+use kube::{Api, ResourceExt};
 use proto::intercept_discovery_server::InterceptDiscoveryServer;
 use proxy::{
     DialRequest, InterceptRouteKey, InterceptRouteMap, InterceptRuleKey, InterceptRuleMap,
@@ -28,6 +25,10 @@ use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tonic::{Status, transport};
+use tracing::{debug, error, info};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 mod ctrl;
@@ -48,6 +49,9 @@ struct Args {
     #[arg(short, long, default_value_t = 8101)]
     reverse_port: u16,
 
+    #[arg(short, long, default_value_t = 18326)]
+    gate_port: u16,
+
     #[arg(short, long, default_value = "/certs/pmz.crt")]
     cert: String,
 
@@ -57,13 +61,18 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    env_logger::init();
-
-    let args = Args::parse();
+    let (non_blocking, _guard) = tracing_appender::non_blocking(std::io::stdout());
+    tracing_subscriber::registry()
+        .with(EnvFilter::from_default_env())
+        .with(fmt::layer().with_writer(non_blocking))
+        .init();
 
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .unwrap();
+
+    let args = Args::parse();
+    info!(?args, "Starting pmz-agent with parsed arguments");
 
     let subs = HashMap::new();
     let subs = Arc::new(RwLock::new(subs));
@@ -110,6 +119,24 @@ async fn main() -> Result<()> {
     let (intercept_rule_tx, mut intercept_rule_rx) =
         mpsc::channel::<(InterceptRuleKey, InterceptValue)>(1);
 
+    // let client = kube::Client::try_default().await?;
+    // let ssapply = PatchParams::apply("pmz-agent").force();
+    // let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+    // crds.patch(
+    //     "interceptrules.pmz.sinabro.io",
+    //     &ssapply,
+    //     &Patch::Apply(InterceptRule::crd()),
+    // )
+    // .await?;
+
+    // debug!("Waiting for the api-server to accept the CRD");
+    // let establish = await_condition(
+    //     crds,
+    //     "interceptrules.pmz.sinabro.io",
+    //     conditions::is_crd_established(),
+    // );
+    // let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish).await?;
+
     // intercept rule thread
     tokio::spawn(async move {
         loop {
@@ -152,6 +179,7 @@ async fn main() -> Result<()> {
                             let route_value = InterceptValue {
                                 id: value.id,
                                 target_port: value.target_port,
+                                // ..Default::default()
                             };
                             debug!("intercept route key: {route_key:?}, value: {route_value:?}");
                             intercept_route_map
@@ -163,24 +191,24 @@ async fn main() -> Result<()> {
                 }
 
                 let ssapply = PatchParams::apply("pmz-agent").force();
-                let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
-                crds.patch(
-                    "interceptrules.pmz.sinabro.io",
-                    &ssapply,
-                    &Patch::Apply(InterceptRule::crd()),
-                )
-                .await
-                .unwrap();
+                // let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
+                // crds.patch(
+                //     "interceptrules.pmz.sinabro.io",
+                //     &ssapply,
+                //     &Patch::Apply(InterceptRule::crd()),
+                // )
+                // .await
+                // .unwrap();
 
-                debug!("Waiting for the api-server to accept the CRD");
-                let establish = await_condition(
-                    crds,
-                    "interceptrules.pmz.sinabro.io",
-                    conditions::is_crd_established(),
-                );
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish)
-                    .await
-                    .unwrap();
+                // debug!("Waiting for the api-server to accept the CRD");
+                // let establish = await_condition(
+                //     crds,
+                //     "interceptrules.pmz.sinabro.io",
+                //     conditions::is_crd_established(),
+                // );
+                // let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish)
+                //     .await
+                //     .unwrap();
 
                 let intercept_rule_api: Api<InterceptRule> =
                     Api::namespaced(client.clone(), &key.namespace);
@@ -189,10 +217,15 @@ async fn main() -> Result<()> {
                 let mut intercept_rule_cr = InterceptRule::new(
                     &intercelt_rule_name,
                     InterceptRuleSpec {
-                        service: key.service.clone(),
-                        port: key.port,
-                        local_port: value.target_port,
-                        id: value.id.to_string(),
+                        r#match: Match {
+                            service: key.service.clone(),
+                            port: key.port,
+                            http: None,
+                        },
+                        forward_to: ForwardTo {
+                            id: value.id.to_string(),
+                            port: value.target_port,
+                        },
                     },
                 );
                 let labels = intercept_rule_cr.labels_mut();
@@ -249,8 +282,8 @@ async fn main() -> Result<()> {
                                     for eps_port in eps_ports {
                                         let port = eps_port.port.unwrap_or(0) as u16;
                                         let rule_key = InterceptRuleKey {
-                                            service: service_name.clone(),
                                             namespace: namespace.clone(),
+                                            service: service_name.clone(),
                                             port,
                                         };
 
@@ -267,6 +300,7 @@ async fn main() -> Result<()> {
                                                     let value = InterceptValue {
                                                         id: rule_value.id,
                                                         target_port: rule_value.target_port,
+                                                        // ..Default::default()
                                                     };
                                                     debug!(
                                                         "Try to add route to map with {:?}",
@@ -294,107 +328,6 @@ async fn main() -> Result<()> {
             }
         }
     });
-
-    // TODO Deprecated: we don't need to this anymore.
-    // service watcher
-    // tokio::spawn(async move {
-    //     let client = kube::Client::try_default().await.unwrap();
-    //     let api: Api<Service> = Api::all(client);
-
-    //     let mut stream = watcher(api, watcher::Config::default())
-    //         .default_backoff()
-    //         .boxed();
-
-    //     async fn sync_service_intercept_routes<F>(
-    //         svc: Service,
-    //         intercept_rule_map: Arc<RwLock<InterceptRuleMap>>,
-    //         mut intercept_route_action: F,
-    //     ) -> Result<()>
-    //     where
-    //         F: AsyncFnMut(InterceptRouteKey, InterceptValue) -> Result<()>,
-    //     {
-    //         let mut key = InterceptRuleKey {
-    //             service: svc.name_any(),
-    //             namespace: svc.namespace().unwrap_or_default(),
-    //             port: 0,
-    //         };
-    //         let spec = svc.spec.unwrap();
-    //         let cluster_ip = spec.cluster_ip.unwrap_or_default();
-
-    //         if let Some(svc_ports) = spec.ports {
-    //             for svc_port in svc_ports {
-    //                 let port = svc_port.port;
-    //                 key.port = port.try_into().unwrap_or_default();
-
-    //                 if let Some(value) = intercept_rule_map.read().await.get(&key) {
-    //                     let ip_addr = Ipv4Addr::from_str(&cluster_ip).unwrap();
-    //                     let key = InterceptRouteKey {
-    //                         ip: ip_addr.into(),
-    //                         port: key.port,
-    //                     };
-    //                     let value = InterceptValue {
-    //                         id: value.id,
-    //                         target_port: value.target_port,
-    //                     };
-
-    //                     intercept_route_action(key, value).await.unwrap();
-    //                 }
-    //             }
-    //         }
-    //         Ok(())
-    //     }
-
-    //     // TODO need to update the intercept target table
-    //     async fn handle_service_event(
-    //         event: watcher::Event<Service>,
-    //         intercept_rule_map: Arc<RwLock<InterceptRuleMap>>,
-    //         intercept_route_map: Arc<RwLock<InterceptRouteMap>>,
-    //     ) -> Result<()> {
-    //         match event {
-    //             watcher::Event::Apply(svc) | watcher::Event::InitApply(svc) => {
-    //                 sync_service_intercept_routes(
-    //                     svc,
-    //                     intercept_rule_map,
-    //                     async move |k: InterceptRouteKey, v: InterceptValue| -> Result<()> {
-    //                         intercept_route_map.write().await.insert(k, v);
-    //                         Ok(())
-    //                     },
-    //                 )
-    //                 .await
-    //                 .unwrap();
-    //             }
-    //             watcher::Event::Delete(svc) => {
-    //                 sync_service_intercept_routes(
-    //                     svc,
-    //                     intercept_rule_map,
-    //                     async move |k: InterceptRouteKey, _: InterceptValue| -> Result<()> {
-    //                         intercept_route_map.write().await.remove(&k);
-    //                         Ok(())
-    //                     },
-    //                 )
-    //                 .await
-    //                 .unwrap();
-    //             }
-    //             _ => {}
-    //         }
-    //         Ok(())
-    //     }
-
-    //     loop {
-    //         let intercept_rule_map = intercept_rule_map_for_svc.clone();
-    //         let intercept_route_map = intercept_route_map_for_svc.clone();
-    //         if let Some(next) = stream.next().await {
-    //             match next {
-    //                 Ok(event) => {
-    //                     handle_service_event(event, intercept_rule_map, intercept_route_map)
-    //                         .await
-    //                         .unwrap()
-    //                 }
-    //                 Err(e) => error!("failed to get next service event: {e:?}"),
-    //             }
-    //         }
-    //     }
-    // });
 
     // intercept gate thread
     tokio::spawn(async move {

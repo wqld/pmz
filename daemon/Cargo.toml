@@ -17,11 +17,11 @@ proxy = { package = "proxy", path = "../proxy"}
 anyhow = { workspace = true, default-features = true }
 aya = { workspace = true }
 aya-log = { workspace = true }
-env_logger = { workspace = true }
-libc = { workspace = true }
-log = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 clap = { workspace = true, features = ["derive"] }
+libc = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+tracing = { workspace = true, features = ["attributes", "std"] }
+tracing-subscriber = { workspace = true, features = ["ansi", "fmt", "smallvec", "std", "tracing-log", "env-filter"] }
 
 kube = { version = "2.0", features = ["runtime", "client", "derive"] }
 k8s-openapi = { version = "0.26", features = ["latest"] }
@@ -32,6 +32,7 @@ hyper-util = { version = "0.1", features = ["full"] }
 serde_json = "1.0.133"
 serde = { version = "1.0.216", features = ["derive"] }
 tokio-stream = { version = "0.1.17", features = ["net"] }
+tracing-appender = "0.2"
 rsln = "0.0.6"
 ipnet = "2.10.1"
 http = "1.2.0"

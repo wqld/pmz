@@ -7,7 +7,7 @@ use k8s_openapi::{
         core::v1::{
             Capabilities, Container, EnvVar, EnvVarSource, HostPathVolumeSource,
             ObjectFieldSelector, Pod, PodSpec, PodTemplateSpec, Secret, SecurityContext, Service,
-            ServiceAccount, ServicePort, ServiceSpec, Volume, VolumeMount,
+            ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
         },
         rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
     },
@@ -136,7 +136,7 @@ impl<'a> Deploy<'a> {
                                 name: "host-netns".to_string(),
                                 host_path: Some(HostPathVolumeSource {
                                     path: "/var/run/netns".to_string(),
-                                    type_: Some("Directory".to_string())
+                                    type_: Some("DirectoryOrCreate".to_string())
                                 }),
                                 ..Default::default()
                             }
@@ -232,6 +232,24 @@ impl<'a> Deploy<'a> {
                             }),
                             ..Default::default()
                         }],
+                        tolerations: Some(vec![
+                            Toleration {
+                                effect: Some("NoSchedule".to_string()),
+                                operator: Some("Exists".to_string()),
+                                ..Default::default()
+                            },
+                            
+                            Toleration {
+                                effect: Some("NoExecute".to_string()),
+                                operator: Some("Exists".to_string()),
+                                ..Default::default()
+                            },
+                            Toleration {
+                                key: Some("CriticalAddonsOnly".to_string()),
+                                operator: Some("Exists".to_string()),
+                                ..Default::default()
+                            }
+                        ]),
                         ..Default::default()
                     }),
                 },
@@ -500,6 +518,12 @@ impl<'a> Deploy<'a> {
                         verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned()],
                         ..Default::default()
                     },
+                    PolicyRule {
+                        api_groups: Some(vec!["apiextensions.k8s.io".to_owned()]),
+                        resources: Some(vec!["customresourcedefinitions".to_owned()]),
+                        verbs: vec!["get".to_owned(), "watch".to_owned(), "list".to_owned(), "create".to_owned(), "patch".to_owned()],
+                        ..Default::default()
+                    }
                 ]
             }),
         };

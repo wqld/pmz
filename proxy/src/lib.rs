@@ -12,10 +12,12 @@ pub mod tunnel;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InterceptContext {
     pub id: uuid::Bytes,
-    pub service_name: String,
     pub namespace: String,
-    pub port: u16,
-    pub target_port: u16,
+    pub service_name: String,
+    pub service_port: u16,
+    pub local_port: u16,
+    pub headers: Vec<(String, String)>,
+    pub uri: Option<String>,
 }
 
 pub struct DialRequest {
@@ -64,10 +66,10 @@ impl DerefMut for InterceptRouteMap {
     }
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct InterceptRuleKey {
-    pub service: String,
     pub namespace: String,
+    pub service: String,
     pub port: u16,
 }
 
@@ -77,7 +79,7 @@ pub struct InterceptRouteKey {
     pub port: u16,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Copy, Clone, Default)]
 pub struct InterceptValue {
     pub id: Uuid,
     pub target_port: u16,
