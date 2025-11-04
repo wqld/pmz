@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, bail};
 use rsln::{netlink::Netlink, types::addr::AddrFamily};
 use socket2::SockRef;
 use std::{
@@ -7,7 +7,11 @@ use std::{
     path::Path,
     sync::Arc,
 };
-use tokio::{fs::File, io::AsyncWriteExt, net::TcpStream};
+use tokio::{
+    fs::File,
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::{TcpSocket, TcpStream},
+};
 use tracing::{Instrument, debug, error, info, instrument};
 
 use crate::netns::InpodNetns;
@@ -27,7 +31,8 @@ pub async fn setup_inpod_redirection(
         debug!("Found target netns: {:?}", inpod_netns);
         start_proxy(inpod_netns).await?;
     } else {
-        error!("Could not find target netns for pod IP: {}", pod_ip);
+        error!(pod_ip = %pod_ip, "Could not find target netns");
+        bail!("Could not find target netns for pod IP {}", pod_ip);
     }
 
     Ok(())
@@ -59,10 +64,10 @@ async fn resolve_target_netns(
 
                 if inpod_netns.run(|| has_local_ip_address(pod_ip))? {
                     debug!(
-                        "Found matching process {:?}({}) for IP {}",
-                        proc.exe()?,
                         pid,
-                        pod_ip
+                        pod_ip = %pod_ip,
+                        exe = ?proc.exe(),
+                        "Found matching process"
                     );
 
                     if let Ok(stat) = proc.stat() {
@@ -81,6 +86,7 @@ async fn resolve_target_netns(
 
 #[instrument(skip_all, err)]
 async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
+    // TODO: udp support
     let addr = SocketAddr::from(([0, 0, 0, 0], PROXY_LISTENER_PORT));
 
     let sock = inpod_netns.run(|| {
@@ -107,11 +113,12 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
                 match listener.accept().await {
                     Ok((inbound_stream, remote_addr)) => {
                         tokio::spawn(
-                            proxy_connection(inbound_stream, remote_addr).in_current_span(),
+                            proxy_connection(inbound_stream, remote_addr, inpod_netns.clone())
+                                .in_current_span(),
                         );
                     }
                     Err(e) => {
-                        error!("Failed to accept connection: {:?}", e)
+                        error!(error = ?e, "Failed to accept connection");
                     }
                 }
             }
@@ -123,48 +130,122 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
 }
 
 #[instrument(skip_all, fields(%remote_addr))]
-async fn proxy_connection(mut inbound_stream: tokio::net::TcpStream, remote_addr: SocketAddr) {
+async fn proxy_connection(
+    inbound_stream: tokio::net::TcpStream,
+    remote_addr: SocketAddr,
+    inpod_netns: InpodNetns,
+) {
     let socket_ref = SockRef::from(&inbound_stream);
     let original_dst = match socket_ref.original_dst_v4() {
         Ok(addr) => addr.as_socket().unwrap(),
         Err(e) => {
-            error!("Failed to get original destination: {:?}", e);
+            error!(error = ?e, "Failed to get original destination");
             return;
         }
     };
 
     debug!("Original destination: {:?}", original_dst);
 
-    let mut gate_stream = match TcpStream::connect(INTERCEPT_GATE_ADDR).await {
-        Ok(stream) => stream,
+    let mut inbound_stream = BufReader::new(inbound_stream);
+    let buf = match inbound_stream.fill_buf().await {
+        Ok(buf) if buf.is_empty() => {
+            debug!("Client closed connection before sending data.");
+            return;
+        }
+        Ok(buf) => buf,
         Err(e) => {
-            error!("Failed to connect to intercept gate: {:?}", e);
+            error!(error = ?e, "Failed to buffer inbound stream");
             return;
         }
     };
 
-    match original_dst.ip() {
-        IpAddr::V4(ipv4_addr) => {
-            let ip_bytes = ipv4_addr.octets();
-            let port_bytes = original_dst.port().to_be_bytes();
+    let mut headers = [httparse::EMPTY_HEADER; 64];
+    let mut req = httparse::Request::new(&mut headers);
+    let mut should_forward_to_original = false;
 
-            let mut header = [0u8; 6];
-            header[0..4].copy_from_slice(&ip_bytes);
-            header[4..6].copy_from_slice(&port_bytes);
-
-            if let Err(e) = gate_stream.write_all(&header).await {
-                error!("Failed to write header to gate stream: {:?}", e);
-                return;
+    match req.parse(buf) {
+        Ok(status) if status.is_complete() => {
+            for header in req.headers {
+                if header.name.eq_ignore_ascii_case("pmz-origin") && header.value == b"true" {
+                    should_forward_to_original = true;
+                    debug!("Found 'pmz-origin: true' header. Forwarding to original destination.");
+                    break;
+                }
+            }
+            if !should_forward_to_original {
+                debug!("HTTP request parsed, but 'pmz-origin: true' header not found.");
             }
         }
-        IpAddr::V6(ipv6_addr) => {
-            error!("IPv6 is not supported for interception: {:?}", ipv6_addr);
-            return;
+        Ok(status) if status.is_partial() => {
+            debug!("Partial HTTP request received. Defaulting to intercept gate.");
+        }
+        Err(e) => {
+            debug!(error = ?e, "Failed to parse HTTP request. Defaulting to intercept gate.");
+        }
+        _ => {
+            debug!("Defaulting to intercept gate.");
         }
     }
 
-    if let Err(e) = tokio::io::copy_bidirectional(&mut inbound_stream, &mut gate_stream).await {
-        debug!("Error during proxying: {:?}", e);
+    if should_forward_to_original {
+        let socket = inpod_netns
+            .run(|| {
+                let socket = match original_dst {
+                    SocketAddr::V4(_) => TcpSocket::new_v4().unwrap(),
+                    SocketAddr::V6(_) => TcpSocket::new_v6().unwrap(),
+                };
+                Ok(socket)
+            })
+            .unwrap();
+
+        SockRef::from(&socket).set_mark(1337).unwrap();
+
+        let mut original_dst_stream = match socket.connect(original_dst).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!(error = ?e, "Failed to connect to original destination");
+                return;
+            }
+        };
+
+        if let Err(e) =
+            tokio::io::copy_bidirectional(&mut inbound_stream, &mut original_dst_stream).await
+        {
+            debug!(error = ?e, "Error during proxying to original destination");
+        }
+        debug!("Proxying to original destination completed.");
+    } else {
+        let mut gate_stream = match TcpStream::connect(INTERCEPT_GATE_ADDR).await {
+            Ok(stream) => stream,
+            Err(e) => {
+                error!(error = ?e, "Failed to connect to intercept gate");
+                return;
+            }
+        };
+
+        match original_dst.ip() {
+            IpAddr::V4(ipv4_addr) => {
+                let ip_bytes = ipv4_addr.octets();
+                let port_bytes = original_dst.port().to_be_bytes();
+
+                let mut header = [0u8; 6];
+                header[0..4].copy_from_slice(&ip_bytes);
+                header[4..6].copy_from_slice(&port_bytes);
+
+                if let Err(e) = gate_stream.write_all(&header).await {
+                    error!(errpr = ?e, "Failed to write header to gate stream");
+                    return;
+                }
+            }
+            IpAddr::V6(ipv6_addr) => {
+                error!(ip = %ipv6_addr, "IPv6 is not supported for interception");
+                return;
+            }
+        }
+
+        if let Err(e) = tokio::io::copy_bidirectional(&mut inbound_stream, &mut gate_stream).await {
+            debug!(error = ?e, "Error during proxying");
+        }
     }
 }
 
@@ -267,7 +348,7 @@ fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
                 continue;
             }
 
-            anyhow::bail!(
+            bail!(
                 "Iptables command failed: {:?}, status: {}, stderr: {}",
                 &rule,
                 output.status,

@@ -8,16 +8,19 @@ description = "A command-line tool that allows you to communicate with the pmz d
 
 [dependencies]
 anyhow.workspace = true
-log.workspace = true
-env_logger.workspace = true
 tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true, features = ["attributes", "std"] }
+tracing-subscriber = { workspace = true, features = ["ansi", "fmt", "smallvec", "std", "tracing-log", "env-filter"] }
 clap = { workspace = true, default-features = true, features = ["derive"] }
+
 hyper = { version = "1.5.2", features = ["full"] }
 http-body-util = "0.1.2"
 hyper-util = { version = "0.1", features = ["full"] }
 http = "1.2.0"
+nix = { version = "0.30", features = ["process", "signal", "user", "fs"] }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.135"
+tracing-appender = "0.2"
 
 [[bin]]
 name = "pmzctl"

@@ -3,7 +3,6 @@ use std::{sync::Arc, time::Duration};
 use anyhow::Result;
 use h2::client::SendRequest;
 use hyper::body::Bytes;
-use log::debug;
 use rustls::{ClientConfig, pki_types::ServerName};
 use socket2::{SockRef, TcpKeepalive};
 use tokio::{
@@ -13,6 +12,7 @@ use tokio::{
     time::Instant,
 };
 use tokio_rustls::TlsConnector;
+use tracing::{Instrument, debug, instrument};
 
 use crate::tunnel::stream::TunnelStream;
 
@@ -31,6 +31,7 @@ impl TunnelClient {
         }
     }
 
+    #[instrument(name = "tunnel_client", skip_all, fields(port = %self.tunnel_port))]
     pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
         let sender = establish_h2_connection("localhost", self.tunnel_port, true).await?;
         let send_req = sender.ready().await?;
@@ -53,6 +54,7 @@ impl TunnelClient {
         }
     }
 
+    #[instrument(name = "handle", skip_all)]
     async fn handle_tunnel_request(
         &self,
         send_req: SendRequest<Bytes>,
@@ -60,39 +62,46 @@ impl TunnelClient {
     ) {
         let mut send_req = send_req.clone();
 
-        tokio::spawn(async move {
-            let target = tunnel_req.target;
+        tokio::spawn(
+            async move {
+                let target = tunnel_req.target;
 
-            let req = http::Request::builder()
-                .uri(target)
-                .method(http::Method::CONNECT)
-                .version(http::Version::HTTP_2)
-                .header(PMZ_PROTO_HDR, tunnel_req.protocol)
-                .body(())
-                .unwrap();
+                let req = http::Request::builder()
+                    .uri(target)
+                    .method(http::Method::CONNECT)
+                    .version(http::Version::HTTP_2)
+                    .header(PMZ_PROTO_HDR, tunnel_req.protocol)
+                    .body(())
+                    .unwrap();
 
-            futures::future::poll_fn(|cx| send_req.poll_ready(cx))
-                .await
-                .unwrap();
-            let (resp, send) = send_req.send_request(req, false).unwrap();
-            let recv = resp.await.unwrap().into_body();
+                futures::future::poll_fn(|cx| send_req.poll_ready(cx))
+                    .await
+                    .unwrap();
+                let (resp, send) = send_req.send_request(req, false).unwrap();
+                let recv = resp.await.unwrap().into_body();
 
-            tokio::spawn(async move {
-                let mut server = TunnelStream { recv, send };
+                tokio::spawn(
+                    async move {
+                        let mut server = TunnelStream { recv, send };
 
-                let (from_client, from_server) =
-                    tokio::io::copy_bidirectional(&mut tunnel_req.stream, &mut server)
-                        .await
-                        .unwrap();
+                        let (from_client, from_server) =
+                            tokio::io::copy_bidirectional(&mut tunnel_req.stream, &mut server)
+                                .await
+                                .unwrap();
 
-                debug!(
-                    "client wrote {} bytes and received {} bytes",
-                    from_client, from_server
+                        debug!(
+                            "Client wrote {} bytes and received {} bytes",
+                            from_client, from_server
+                        );
+                    }
+                    .in_current_span(),
                 );
-            });
-        });
+            }
+            .in_current_span(),
+        );
     }
 
+    #[instrument(skip_all)]
     async fn heartbeat(&self, send_req: SendRequest<Bytes>) {
         let mut send_req = send_req.clone();
 
@@ -110,7 +119,7 @@ impl TunnelClient {
             let (resp, _) = send_req.send_request(req, true).unwrap();
             let resp = resp.await.unwrap();
 
-            debug!("heartbeat: {}", resp.status());
+            debug!(status = ?resp.status(), "Heartbeat");
         });
     }
 }

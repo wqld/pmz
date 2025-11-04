@@ -6,13 +6,13 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{body::Incoming, server::conn::http2, service::service_fn, upgrade::Upgraded};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use log::{debug, error, info};
 use rustls::{
     ServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer},
 };
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::TlsAcceptor;
+use tracing::{debug, error, info};
 use udp_stream::UdpStream;
 
 use crate::tunnel::{PMZ_PROTO_HDR, PROTO};

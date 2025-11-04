@@ -26,7 +26,6 @@ use kube::{
     api::Api,
     runtime::wait::{await_condition, conditions::is_pod_running},
 };
-use log::{debug, error, info};
 use proxy::{
     InterceptContext, InterceptRequest,
     tunnel::{
@@ -35,6 +34,7 @@ use proxy::{
     },
 };
 use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
+use serde::Deserialize;
 use tokio::{
     net::{TcpStream, UnixListener},
     sync::{
@@ -43,6 +43,7 @@ use tokio::{
     },
     time::sleep,
 };
+use tracing::{Instrument, debug, error, info, info_span, instrument};
 use uuid::Uuid;
 
 use crate::{
@@ -83,6 +84,7 @@ impl Command {
         }
     }
 
+    #[instrument(name = "command", skip_all)]
     pub async fn run(&self) -> Result<()> {
         rustls::crypto::aws_lc_rs::default_provider()
             .install_default()
@@ -96,10 +98,9 @@ impl Command {
 
         let listener = UnixListener::bind(path)?;
         fs::set_permissions(path, fs::Permissions::from_mode(0o766))?;
-        debug!("Listening for connections at {}.", path.display());
+        debug!(path = ?path, "Unix socket listening");
 
-        loop {
-            let (stream, _) = listener.accept().await?;
+        while let Ok((stream, _)) = listener.accept().await {
             let req_rx = self.req_rx.clone();
             let service_registry = self.service_registry.clone();
             let service_cidr_map = self.service_cidr_map.clone();
@@ -108,32 +109,45 @@ impl Command {
             let intercept_ctx_tx = self.intercept_ctx_tx.clone();
             let intercept_ctx_rx = self.intercept_ctx_rx.clone();
 
-            tokio::task::spawn(async move {
-                if let Err(err) = http1::Builder::new()
-                    .serve_connection(
-                        TokioIo::new(stream),
-                        service_fn(move |req| {
-                            handle_request(
-                                req,
-                                req_rx.clone(),
-                                service_registry.clone(),
-                                service_cidr_map.clone(),
-                                connection_manager.clone(),
-                                connection_status.clone(),
-                                intercept_ctx_tx.clone(),
-                                intercept_ctx_rx.clone(),
-                            )
-                        }),
-                    )
-                    .await
-                {
-                    error!("Error serving connection: {err:#?}");
+            tokio::task::spawn(
+                async move {
+                    if let Err(e) = http1::Builder::new()
+                        .serve_connection(
+                            TokioIo::new(stream),
+                            service_fn(move |req| {
+                                handle_request(
+                                    req,
+                                    req_rx.clone(),
+                                    service_registry.clone(),
+                                    service_cidr_map.clone(),
+                                    connection_manager.clone(),
+                                    connection_status.clone(),
+                                    intercept_ctx_tx.clone(),
+                                    intercept_ctx_rx.clone(),
+                                )
+                            }),
+                        )
+                        .await
+                    {
+                        error!(error = ?e, "Error serving connection");
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
+
+        Ok(())
     }
 }
 
+#[instrument(
+    name = "handle",
+    skip_all,
+    fields(
+        http.method = %req.method(),
+        http.uri = %req.uri(),
+    )
+)]
 async fn handle_request(
     req: Request<Incoming>,
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
@@ -223,6 +237,7 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
     Ok(Response::new(Full::from("Agent deleted")))
 }
 
+#[instrument(skip_all)]
 async fn connect(
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
@@ -249,7 +264,7 @@ async fn connect(
                 break client;
             }
             Err(e) => {
-                log::error!("{}", e);
+                error!("{}", e);
                 sleep(Duration::from_secs(5)).await;
             }
         }
@@ -265,7 +280,8 @@ async fn connect(
             }
         };
 
-    debug!("Checking if agent is running: {agent_name:?}");
+    tracing::Span::current().record("agent.name", &agent_name);
+    tracing::Span::current().record("agent.namespace", &agent_namespace);
 
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &agent_namespace);
 
@@ -314,26 +330,34 @@ async fn connect(
     let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
     let tunnel = TunnelClient::new(tunnel_port, req_rx);
 
-    tokio::spawn(async move {
-        discovery
-            .watch(client, shutdown_discovery, conn_stat_discovery)
-            .await
-    });
-    tokio::spawn(async move {
-        if let Err(e) = forward.start(shutdown_forward, conn_stat_forward).await {
-            error!("failed to run the forward task: {e:?}");
+    tokio::spawn(
+        async move {
+            discovery
+                .watch(client, shutdown_discovery, conn_stat_discovery)
+                .await
         }
-    });
-    tokio::spawn(async move {
-        if let Err(e) = tunnel.run(shutdown_tunnel).await {
-            error!("failed to run the tunnel task: {e:?}");
+        .in_current_span(),
+    );
+    tokio::spawn(
+        async move {
+            if let Err(e) = forward.start(shutdown_forward, conn_stat_forward).await {
+                error!(error = ?e, "failed to run the forward task");
+            }
         }
-    });
+        .in_current_span(),
+    );
+    tokio::spawn(
+        async move {
+            if let Err(e) = tunnel.run(shutdown_tunnel).await {
+                error!(error = ?e, "failed to run the tunnel task");
+            }
+        }
+        .in_current_span(),
+    );
 
     while let None = connection_status.read().await.forward {}
 
-    // // TODO: how to get the namespace for pmz-agnet?
-    let dns_query = Discovery::create_dns_query("pmz-agent", "default").unwrap();
+    let dns_query = Discovery::create_dns_query("pmz-agent", &agent_namespace);
     let pmz_agent_service_ip: String;
 
     loop {
@@ -383,16 +407,46 @@ async fn connect(
         debug!("uuid is allocated from agent: {uuid:?}");
 
         // register an intercept rule from daemon to agent
-        tokio::spawn(async move {
-            loop {
-                if let Some(mut ctx) = intercept_ctx_rx.lock().await.recv().await {
+        tokio::spawn(
+            async move {
+                info!("Starting intercept rule registration task");
+
+                while let Some(mut ctx) = intercept_ctx_rx.lock().await.recv().await {
                     ctx.id = uuid.into_bytes();
-                    let ctx = serde_json::to_vec(&ctx).unwrap();
-                    debug!("request to register an intercept rule {ctx:?}");
-                    send.send_data(ctx.into(), false).unwrap();
+                    let rule_id = ctx.id;
+
+                    let payload = match serde_json::to_vec(&ctx) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!(
+                                ctx_id = ?rule_id,
+                                error = ?e,
+                                "Failed to serialize intercept context"
+                            );
+                            continue;
+                        }
+                    };
+
+                    debug!(
+                        ctx_id = ?rule_id,
+                        payload_size = payload.len(),
+                        "Sending intercept rule"
+                    );
+
+                    if let Err(e) = send.send_data(payload.into(), false) {
+                        error!(
+                            ctx_id = ?rule_id,
+                            error = ?e,
+                            "Failed to send intercept rule. Stopping task."
+                        );
+                        break;
+                    }
                 }
+
+                info!("Intercept context channel closed. Shutting down task.");
             }
-        });
+            .instrument(info_span!("intercept_rule_registration_task", agent_id = %uuid)),
+        );
 
         // receive target port from agent to initiate dialing
         tokio::spawn(async move {
@@ -669,19 +723,29 @@ async fn start_intercept(
         return Ok(res);
     }
 
-    let body = req.collect().await?.aggregate();
-    let props: serde_json::Value = serde_json::from_reader(body.reader())?;
-    debug!("data: {props:?}");
+    #[derive(Deserialize, Debug)]
+    struct InterceptStartRequest {
+        namespace: String,
+        service: String,
+        port: String,
+        #[serde(default, rename = "header")]
+        headers: Vec<(String, String)>,
+        uri: Option<String>,
+    }
 
-    let namespace = props["namespace"].as_str().unwrap_or("default");
-    let service_name = match props["service"].as_str() {
-        Some(service) => service,
-        None => {
-            return Ok(Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Full::from("Please provide the service name."))?);
-        }
-    };
+    let body = req.collect().await?.aggregate();
+    let req: InterceptStartRequest = serde_json::from_reader(body.reader())?;
+    debug!("InterceptStartRequest: {req:?}");
+
+    // let namespace = req.namespace;
+    // let service_name = match req.service {
+    //     Some(service) => service,
+    //     None => {
+    //         return Ok(Response::builder()
+    //             .status(StatusCode::BAD_REQUEST)
+    //             .body(Full::from("Please provide the service name."))?);
+    //     }
+    // };
 
     // let dns_query = Discovery::create_dns_query(service_name, namespace)?;
 
@@ -696,7 +760,7 @@ async fn start_intercept(
     //         )?),
     //     };
 
-    let (local_port, service_port) = match parse_ports(props["port"].as_str()) {
+    let (local_port, service_port) = match parse_ports(&req.port) {
         Ok((lo, svc)) => (lo, svc),
         Err(e) => {
             return Ok(Response::builder()
@@ -709,8 +773,8 @@ async fn start_intercept(
 
     // ensure that the service requested to intercept traffic exists
     let client = kube::Client::try_default().await?;
-    let services: Api<Service> = Api::namespaced(client, namespace);
-    let _ = match services.get(&service_name).await {
+    let services: Api<Service> = Api::namespaced(client, &req.namespace);
+    let _ = match services.get(&req.service).await {
         Ok(service) => {
             if let None = service
                 .spec
@@ -721,7 +785,8 @@ async fn start_intercept(
             {
                 return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
                     Full::from(format!(
-                        "Service '{service_name}' does not expose port {service_port}"
+                        "Service '{}' does not expose port {service_port}",
+                        req.service
                     )),
                 )?);
             }
@@ -729,7 +794,7 @@ async fn start_intercept(
         Err(_) => {
             return Ok(Response::builder()
                 .status(StatusCode::BAD_REQUEST)
-                .body(Full::from(format!("Service {service_name:?} not founds")))?);
+                .body(Full::from(format!("Service {:?} not founds", req.service)))?);
         }
     };
 
@@ -741,10 +806,12 @@ async fn start_intercept(
 
     let intercept_ctx = InterceptContext {
         id: Uuid::nil().into_bytes(),
-        service_name: service_name.to_string(),
-        namespace: namespace.to_string(),
-        port: service_port,
-        target_port: local_port,
+        namespace: req.namespace,
+        service_name: req.service,
+        service_port,
+        local_port,
+        headers: req.headers,
+        uri: req.uri,
     };
 
     debug!("send intercept context: {intercept_ctx:?}");
@@ -785,9 +852,9 @@ async fn start_intercept(
         .unwrap())
 }
 
-fn parse_ports(port_input: Option<&str>) -> Result<(u16, u16)> {
+fn parse_ports(port_input: &str) -> Result<(u16, u16)> {
     port_input
-        .and_then(|v| v.split_once(':'))
+        .split_once(':')
         .and_then(|(local, service)| {
             let local = local.parse::<u16>().ok()?;
             let service = service.parse::<u16>().ok()?;

@@ -1,8 +1,8 @@
 use std::process::{Command, Stdio};
 
-use anyhow::Result;
-use log::debug;
 use PrivilegeLevel::*;
+use anyhow::Result;
+use tracing::debug;
 
 #[derive(Debug)]
 pub enum PrivilegeLevel {

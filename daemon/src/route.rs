@@ -1,15 +1,14 @@
 use std::{error::Error, sync::Arc};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use aya::maps::{HashMap, MapData};
 use ipnet::IpNet;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
+    Api,
     api::{DeleteParams, PostParams},
     core::ErrorResponse,
-    Api,
 };
-use log::{debug, error, info};
 use rsln::{
     netlink::Netlink,
     types::{
@@ -19,6 +18,7 @@ use rsln::{
 };
 use serde_json::json;
 use tokio::sync::RwLock;
+use tracing::{debug, error, info};
 
 pub struct Route {
     netlink: Netlink,

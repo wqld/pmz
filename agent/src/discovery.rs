@@ -1,10 +1,10 @@
 use std::{collections::HashMap, pin::Pin, sync::Arc};
 
-use log::{debug, info};
 use proto::{DiscoveryRequest, DiscoveryResponse, intercept_discovery_server::InterceptDiscovery};
 use tokio::sync::{RwLock, mpsc};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Request, Response, Status};
+use tracing::{debug, info};
 
 use crate::DiscovertTx;
 
