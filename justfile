@@ -33,3 +33,10 @@ alias patg := publish-agent-to-ghrc
 @build-proto:
     cargo clean -p proto
     cargo build -p proto
+
+@create-kind:
+    kind create cluster --config tests/kind-config.yaml
+
+@setup-env: create-kind build-proto install-crd load-agent-to-kind load-cni-to-kind
+    kubectl apply -f tests/echo.yaml
+    k9s

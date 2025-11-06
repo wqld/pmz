@@ -332,7 +332,7 @@ async fn main() -> Result<()> {
     // intercept gate thread
     tokio::spawn(async move {
         let gate_port = 18326;
-        let addr = SocketAddr::from(([127, 0, 0, 1], gate_port));
+        let addr = SocketAddr::from(([0, 0, 0, 0], gate_port));
 
         let listener = TcpListener::bind(addr).await.unwrap();
         debug!("Intercep Gate: Listening on {addr}");

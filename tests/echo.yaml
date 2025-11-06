@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo
+  namespace: default
+  labels:
+    app: echo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo
+  template:
+    metadata:
+      labels:
+        app: echo
+    spec:
+      containers:
+      - name: echo-server
+        image: ealen/echo-server
+        ports:
+        - containerPort: 80
+        env:
+        - name: "ECHO_SERVER_PORT"
+          value: "80"
+        - name: "POD_NAME"
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: "ECHO_BODY"
+          value: "Hello from Pod: $(POD_NAME)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo
+  namespace: default
+spec:
+  selector:
+    app: echo
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

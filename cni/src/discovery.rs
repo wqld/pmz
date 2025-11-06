@@ -106,7 +106,14 @@ impl Discovery {
             .filter_map(|pod_ip| pod_ip.parse::<IpAddr>().ok());
 
         for pod_ip in pod_ips {
-            if let Err(e) = setup_inpod_redirection(pod_ip, current_netns.clone(), None).await {
+            if let Err(e) = setup_inpod_redirection(
+                pod_ip,
+                &self.config.intercept_gate_addr,
+                current_netns.clone(),
+                None,
+            )
+            .await
+            {
                 error!(?pod_ip, error = ?e, "Failed to setup redirection for pod");
             }
         }
