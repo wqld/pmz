@@ -17,11 +17,11 @@ use tracing::{Instrument, debug, error, info, instrument};
 use crate::netns::InpodNetns;
 
 const PROXY_LISTENER_PORT: u16 = 18325;
-const INTERCEPT_GATE_ADDR: &str = "127.0.0.1:18326";
 
 #[instrument(name = "inpod_redirection", skip_all, fields(%pod_ip))]
 pub async fn setup_inpod_redirection(
     pod_ip: IpAddr,
+    intercept_gate_addr: &str,
     current_netns: Arc<OwnedFd>,
     target_netns: Option<OwnedFd>,
 ) -> Result<()> {
@@ -29,7 +29,7 @@ pub async fn setup_inpod_redirection(
 
     if let Some(inpod_netns) = target_netns {
         debug!("Found target netns: {:?}", inpod_netns);
-        start_proxy(inpod_netns).await?;
+        start_proxy(inpod_netns, intercept_gate_addr).await?;
     } else {
         error!(pod_ip = %pod_ip, "Could not find target netns");
         bail!("Could not find target netns for pod IP {}", pod_ip);
@@ -85,7 +85,7 @@ async fn resolve_target_netns(
 }
 
 #[instrument(skip_all, err)]
-async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
+async fn start_proxy(inpod_netns: InpodNetns, intercept_gate_url: &str) -> Result<()> {
     // TODO: udp support
     let addr = SocketAddr::from(([0, 0, 0, 0], PROXY_LISTENER_PORT));
 
@@ -106,6 +106,7 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
     info!("Starting intercept listener in pod netns at {}", addr);
     // SockRef::from(&listener).set_ip_transparent_v4(true)?;
     // let listener = SockRef::from(&listener);
+    let intercept_gate_addr = intercept_gate_url.to_owned();
 
     tokio::spawn(
         async move {
@@ -113,8 +114,13 @@ async fn start_proxy(inpod_netns: InpodNetns) -> Result<()> {
                 match listener.accept().await {
                     Ok((inbound_stream, remote_addr)) => {
                         tokio::spawn(
-                            proxy_connection(inbound_stream, remote_addr, inpod_netns.clone())
-                                .in_current_span(),
+                            proxy_connection(
+                                inbound_stream,
+                                remote_addr,
+                                inpod_netns.clone(),
+                                intercept_gate_addr.clone(),
+                            )
+                            .in_current_span(),
                         );
                     }
                     Err(e) => {
@@ -134,6 +140,7 @@ async fn proxy_connection(
     inbound_stream: tokio::net::TcpStream,
     remote_addr: SocketAddr,
     inpod_netns: InpodNetns,
+    intercept_gate_addr: String,
 ) {
     let socket_ref = SockRef::from(&inbound_stream);
     let original_dst = match socket_ref.original_dst_v4() {
@@ -215,7 +222,7 @@ async fn proxy_connection(
         }
         debug!("Proxying to original destination completed.");
     } else {
-        let mut gate_stream = match TcpStream::connect(INTERCEPT_GATE_ADDR).await {
+        let mut gate_stream = match TcpStream::connect(intercept_gate_addr).await {
             Ok(stream) => stream,
             Err(e) => {
                 error!(error = ?e, "Failed to connect to intercept gate");

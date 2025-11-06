@@ -1,0 +1,55 @@
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-multinode
+  namespace: default
+  labels:
+    app: echo-multinode
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: echo-multinode
+  template:
+    metadata:
+      labels:
+        app: echo-multinode
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: app
+                operator: In
+                values:
+                - echo-multinode
+            topologyKey: "kubernetes.io/hostname"
+      containers:
+      - name: echo-server
+        image: ealen/echo-server
+        ports:
+        - containerPort: 80
+        env:
+        - name: "ECHO_SERVER_PORT"
+          value: "80"
+        - name: "POD_NAME"
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: "ECHO_BODY"
+          value: "Hello from Multi-Node Pod: $(POD_NAME)\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-multinode
+  namespace: default
+spec:
+  selector:
+    app: echo-multinode
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

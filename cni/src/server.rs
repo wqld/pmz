@@ -67,6 +67,7 @@ impl CniServer {
             let (stream, _) = listener.accept().await?;
             let service_index = self.service_index.clone();
             let service_store = self.service_store.clone();
+            let intercept_gate_url = self.config.intercept_gate_addr.clone();
 
             tokio::spawn(
                 async move {
@@ -78,6 +79,7 @@ impl CniServer {
                                     req,
                                     service_index.clone(),
                                     service_store.clone(),
+                                    intercept_gate_url.clone(),
                                 )
                             }),
                         )
@@ -103,6 +105,7 @@ impl CniServer {
         req: Request<Incoming>,
         svc_index: ServiceIndex,
         svc_store: Store<Service>,
+        intercept_gate_addr: String,
     ) -> Result<Response<Full<Bytes>>> {
         let body = req.collect().await?.aggregate();
         let event: CniAddEvent = serde_json::from_reader(body.reader())?;
@@ -160,8 +163,13 @@ impl CniServer {
                 let target_netns = File::open(target_netns_path).await?;
                 let target_netns_fd = target_netns.into_std().await.into();
 
-                setup_inpod_redirection(pod_ip, current_netns.clone(), Some(target_netns_fd))
-                    .await?;
+                setup_inpod_redirection(
+                    pod_ip,
+                    &intercept_gate_addr,
+                    current_netns.clone(),
+                    Some(target_netns_fd),
+                )
+                .await?;
             }
         }
 

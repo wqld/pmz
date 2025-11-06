@@ -1,0 +1,46 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: test
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-test
+  namespace: test
+  labels:
+    app: echo-test
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-test
+  template:
+    metadata:
+      labels:
+        app: echo-test
+    spec:
+      containers:
+      - name: echo-server
+        image: ealen/echo-server
+        ports:
+        - containerPort: 80
+        env:
+        - name: "ECHO_SERVER_PORT"
+          value: "80"
+        - name: "ECHO_BODY"
+          value: "Hello from 'test' namespace\n"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-test
+  namespace: test
+spec:
+  selector:
+    app: echo-test
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 80

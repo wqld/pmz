@@ -363,6 +363,12 @@ impl<'a> Deploy<'a> {
                         port: 50018,
                         ..Default::default()
                     },
+                    ServicePort {
+                        name: Some("gate".to_string()),
+                        protocol: Some("TCP".to_string()),
+                        port: 18326,
+                        ..Default::default()
+                    },
                 ]),
                 ..Default::default()
             }),
