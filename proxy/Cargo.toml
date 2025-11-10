@@ -23,6 +23,6 @@ tokio-rustls = "0.26.1"
 tracing-appender = "0.2"
 h2 = "0.4.7"
 udp-stream = "0.0.12"
-socket2 = "0.5.8"
+socket2 = "0.6.1"
 uuid = { version = "1.16.0", features = ["v7"] }
 
