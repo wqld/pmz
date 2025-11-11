@@ -2,10 +2,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use tokio::sync::{RwLock, broadcast};
 
-use crate::route::Route;
+use crate::route::Router;
 
 pub struct Connection {
-    pub _route: Route,
+    pub _route: Router,
     pub shutdown_tx: broadcast::Sender<()>,
 }
 

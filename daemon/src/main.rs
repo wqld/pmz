@@ -23,6 +23,7 @@ mod connect;
 mod deploy;
 mod discovery;
 mod forward;
+mod intercept;
 mod proxy;
 mod route;
 mod sudo;

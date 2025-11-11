@@ -1,6 +1,5 @@
 use std::{
-    fs::{self, File},
-    io::Write,
+    fs::{self},
     net::Ipv4Addr,
     os::unix::fs::PermissionsExt,
     path::Path,
@@ -11,7 +10,6 @@ use std::{
 use anyhow::{Result, anyhow, bail};
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA};
-use h2::client::SendRequest;
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -21,37 +19,32 @@ use hyper::{
     service::service_fn,
 };
 use hyper_util::rt::TokioIo;
-use k8s_openapi::api::core::v1::{Pod, Secret, Service};
-use kube::{
-    api::Api,
-    runtime::wait::{await_condition, conditions::is_pod_running},
-};
+use k8s_openapi::api::core::v1::Service;
+use kube::api::Api;
 use proxy::{
-    InterceptContext, InterceptRequest,
-    tunnel::{
-        client::{TunnelClient, TunnelRequest, establish_h2_connection},
-        stream::TunnelStream,
-    },
+    InterceptContext,
+    tunnel::client::{TunnelClient, TunnelRequest},
 };
 use rsln::{handle::sock_diag::DiagFamily, netlink::Netlink};
 use serde::Deserialize;
 use tokio::{
-    net::{TcpStream, UnixListener},
+    net::UnixListener,
     sync::{
         Mutex, RwLock, broadcast,
         mpsc::{self, Receiver},
     },
     time::sleep,
 };
-use tracing::{Instrument, debug, error, info, info_span, instrument};
+use tracing::{Instrument, debug, error, info, instrument};
 use uuid::Uuid;
 
 use crate::{
     connect::{Connection, ConnectionManager, ConnectionStatus},
     deploy::Deploy,
     discovery::Discovery,
-    forward::Forward,
-    route::Route,
+    forward::Forwarder,
+    intercept::Interceptor,
+    route::Router,
 };
 
 pub struct Command {
@@ -270,260 +263,42 @@ async fn connect(
         }
     };
 
-    let (agent_name, agent_namespace) =
-        match Deploy::get_pod_info_by_label(client.clone(), "app=pmz-agent").await {
-            Ok(pod_info) => pod_info,
-            Err(_) => {
-                return Ok(Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Full::from("pmz-agent not found"))?);
-            }
-        };
-
-    tracing::Span::current().record("agent.name", &agent_name);
-    tracing::Span::current().record("agent.namespace", &agent_namespace);
-
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), &agent_namespace);
-
-    let pmz_tls = secrets.get("pmz-tls").await?;
-
-    if let Some(data) = pmz_tls.data {
-        if let Some(crt) = data.get("tls.crt") {
-            let home_dir = std::env::var("HOME")?;
-            let cert_dir = Path::new(&home_dir).join(".config/pmz/certs");
-            std::fs::create_dir_all(&cert_dir)?;
-
-            let cert_path = cert_dir.join("pmz.crt");
-            let mut cert_file = File::create(cert_path)?;
-            cert_file.write_all(&crt.0)?;
-        } else {
-            return Ok(Response::builder()
-                .status(StatusCode::NOT_FOUND)
-                .body(Full::from("pmz-tls secret doesn't have a tls.crt field."))?);
-        }
-    } else {
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .body(Full::from("pmz-tls secret doesn't have a data attribute."))?);
-    }
-
-    let pods: Api<Pod> = Api::namespaced(client.clone(), &agent_namespace);
-    let running = await_condition(pods.clone(), &agent_name, is_pod_running());
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), running).await?;
-
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
-    let shutdown_discovery = shutdown_tx.subscribe();
-    let shutdown_forward = shutdown_tx.subscribe();
-    let shutdown_tunnel = shutdown_tx.subscribe();
-    let mut shutdown_dial = shutdown_tx.subscribe();
-    let mut shutdown_intercept = shutdown_tx.subscribe();
+    let shutdown_intercept = shutdown_tx.subscribe();
 
     let service_registry_clone = service_registry.clone();
 
     // let conn_stat_route = connection_status.clone();
     let conn_stat_discovery = connection_status.clone();
-    let conn_stat_forward = connection_status.clone();
+    let conn_stat_forwarder = connection_status.clone();
     // let conn_stat_tunnel = connection_status.clone();
 
-    let route = Route::setup_routes(service_cidr_map).await?;
-    let discovery = Discovery::new(service_registry);
-    let forward = Forward::new(&agent_name, agent_port, tunnel_port, pods);
-    let tunnel = TunnelClient::new(tunnel_port, req_rx);
+    let router = Router::setup_routes(service_cidr_map).await?;
+    let mut discovery = Discovery::new(service_registry, shutdown_tx.subscribe(), client.clone());
+    let mut tunnel = TunnelClient::new(tunnel_port, req_rx, shutdown_tx.subscribe());
+    let mut forwarder = Forwarder::new(
+        agent_port,
+        tunnel_port,
+        shutdown_tx.subscribe(),
+        client.clone(),
+    );
+    let interceptor = Interceptor::new(
+        service_registry_clone,
+        intercept_ctx_rx,
+        shutdown_intercept,
+        client.clone(),
+    );
 
-    tokio::spawn(
-        async move {
-            discovery
-                .watch(client, shutdown_discovery, conn_stat_discovery)
-                .await
-        }
-        .in_current_span(),
-    );
-    tokio::spawn(
-        async move {
-            if let Err(e) = forward.start(shutdown_forward, conn_stat_forward).await {
-                error!(error = ?e, "failed to run the forward task");
-            }
-        }
-        .in_current_span(),
-    );
-    tokio::spawn(
-        async move {
-            if let Err(e) = tunnel.run(shutdown_tunnel).await {
-                error!(error = ?e, "failed to run the tunnel task");
-            }
-        }
-        .in_current_span(),
-    );
+    tokio::spawn(async move { discovery.watch(conn_stat_discovery).await }.in_current_span());
+    tokio::spawn(async move { forwarder.start(conn_stat_forwarder).await }.in_current_span());
+    tokio::spawn(async move { tunnel.run().await }.in_current_span());
 
     while let None = connection_status.read().await.forward {}
 
-    let dns_query = Discovery::create_dns_query("pmz-agent", &agent_namespace);
-    let pmz_agent_service_ip: String;
-
-    loop {
-        let service_registry = service_registry_clone.read().await;
-        if let Ok(ip) = service_registry.get(&dns_query, 0) {
-            pmz_agent_service_ip = Ipv4Addr::from(ip.ip).to_string();
-            debug!("found IP for pmz-agent: {}", pmz_agent_service_ip);
-            break;
-        } else {
-            drop(service_registry);
-            debug!("service 'pmz-agent' not yet available in registry, retrying...");
-            tokio::time::sleep(Duration::from_secs(1)).await;
-        }
-    }
-
-    let pmz_agent_service_ip_clone = pmz_agent_service_ip.clone();
-    let (intercept_tx, mut intercept_rx) = mpsc::channel::<Bytes>(1);
-
-    // dial & intercept thread
-    tokio::spawn(async move {
-        let sender = establish_h2_connection(&pmz_agent_service_ip_clone, 8101, false)
-            .await
-            .unwrap();
-        let mut send_req = sender.ready().await.unwrap();
-        let send_req_clone = send_req.clone();
-
-        // open a dial stream with agent
-        let req = Request::builder().uri("/dial").body(()).unwrap();
-
-        // send the preface
-        let (resp, mut send) = send_req.send_request(req, false).unwrap();
-        send.send_data("dial-preface-from-agent".into(), false)
-            .unwrap();
-
-        let resp = resp.await.unwrap();
-        let mut recv = resp.into_body();
-
-        // get an uuid
-        let uuid = if let Some(data) = recv.data().await {
-            let data = data.unwrap();
-            Uuid::from_slice(&data).unwrap()
-        } else {
-            // TODO need to proceed as an error case
-            Uuid::nil()
-        };
-
-        debug!("uuid is allocated from agent: {uuid:?}");
-
-        // register an intercept rule from daemon to agent
-        tokio::spawn(
-            async move {
-                info!("Starting intercept rule registration task");
-
-                while let Some(mut ctx) = intercept_ctx_rx.lock().await.recv().await {
-                    ctx.id = uuid.into_bytes();
-                    let rule_id = ctx.id;
-
-                    let payload = match serde_json::to_vec(&ctx) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            error!(
-                                ctx_id = ?rule_id,
-                                error = ?e,
-                                "Failed to serialize intercept context"
-                            );
-                            continue;
-                        }
-                    };
-
-                    debug!(
-                        ctx_id = ?rule_id,
-                        payload_size = payload.len(),
-                        "Sending intercept rule"
-                    );
-
-                    if let Err(e) = send.send_data(payload.into(), false) {
-                        error!(
-                            ctx_id = ?rule_id,
-                            error = ?e,
-                            "Failed to send intercept rule. Stopping task."
-                        );
-                        break;
-                    }
-                }
-
-                info!("Intercept context channel closed. Shutting down task.");
-            }
-            .instrument(info_span!("intercept_rule_registration_task", agent_id = %uuid)),
-        );
-
-        // receive target port from agent to initiate dialing
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(data) = recv.data() => {
-                        match data {
-                            Ok(target_port) => {
-                                if let Err(e) = intercept_tx.send(target_port).await {
-                                    error!("intercept_tx.send failed: {e:?}")
-                                }
-                            },
-                            Err(e) => error!("recv.data failed: {e:?}"),
-                        }
-                    }
-                    _ = shutdown_dial.recv() => break
-                }
-            }
-        });
-
-        async fn intercept_tunnel(
-            mut send_req: SendRequest<Bytes>,
-            id: Uuid,
-            target_port: u16,
-        ) -> Result<()> {
-            let req = Request::builder().uri("/intercept").body(()).unwrap();
-
-            let (resp, mut send) = send_req.send_request(req, false).unwrap();
-            let intercept_req = InterceptRequest {
-                id: id.into_bytes(),
-                target_port,
-            };
-            let intercept_req = serde_json::to_vec(&intercept_req)?;
-            send.send_data(intercept_req.into(), false).unwrap();
-
-            let resp = resp.await.unwrap();
-            debug!("got response: {:?}", resp);
-
-            let recv = resp.into_body();
-
-            let mut downstream = TunnelStream { recv, send };
-            let target_addr = format!("localhost:{}", target_port);
-            let mut upstream = TcpStream::connect(target_addr).await?;
-
-            tokio::io::copy_bidirectional(&mut downstream, &mut upstream)
-                .await
-                .unwrap();
-
-            Ok(())
-        }
-
-        // establish a connection with the local process using the target port
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    Some(target_port) = intercept_rx.recv() => {
-                        let target_port = {
-                            let byte_slice = target_port.as_ref();
-
-                            if byte_slice.len() != 2 {
-                                error!("target_port's slice must be 2 bytes");
-                                continue
-                            }
-
-                            u16::from_be_bytes([byte_slice[0], byte_slice[1]])
-                        };
-
-                        intercept_tunnel(send_req_clone.clone(), uuid, target_port).await.unwrap();
-                    }
-                    _ = shutdown_intercept.recv() => break
-                }
-            }
-        });
-    });
+    tokio::spawn(async move { interceptor.launch().await }.in_current_span());
 
     let connection = Connection {
-        _route: route,
+        _route: router,
         shutdown_tx,
     };
 
