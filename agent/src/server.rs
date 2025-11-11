@@ -233,7 +233,7 @@ async fn handle_intercept_rules(
             Ok(b) => b,
             Err(e) => {
                 error!("Failed to read data from body stream: {e:?}");
-                continue;
+                break;
             }
         };
 

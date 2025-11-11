@@ -20,19 +20,19 @@ use serde_json::json;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info};
 
-pub struct Route {
+pub struct Router {
     netlink: Netlink,
     service_route: Routing,
 }
 
-impl Drop for Route {
+impl Drop for Router {
     fn drop(&mut self) {
         debug!("route dropped");
         self.drop_routes()
     }
 }
 
-impl Route {
+impl Router {
     pub async fn setup_routes(
         service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
     ) -> Result<Self> {

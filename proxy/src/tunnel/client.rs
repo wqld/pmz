@@ -1,4 +1,4 @@
-use std::{sync::Arc, time::Duration};
+use std::{pin::Pin, sync::Arc, time::Duration};
 
 use anyhow::Result;
 use h2::client::SendRequest;
@@ -9,46 +9,86 @@ use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
     sync::{Mutex, broadcast, mpsc::Receiver},
-    time::Instant,
+    time::{Instant, sleep},
 };
 use tokio_rustls::TlsConnector;
-use tracing::{Instrument, debug, instrument};
+use tracing::{Instrument, debug, error, instrument};
 
 use crate::tunnel::stream::TunnelStream;
 
 use super::{PMZ_PROTO_HDR, verifier::PmzCertVerifier};
 
+type ConnectionFuture = Pin<Box<dyn Future<Output = Result<(), h2::Error>> + Send>>;
+
 pub struct TunnelClient {
     tunnel_port: u16,
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
+    shutdown: broadcast::Receiver<()>,
 }
 
 impl TunnelClient {
-    pub fn new(tunnel_port: u16, req_rx: Arc<Mutex<Receiver<TunnelRequest>>>) -> Self {
+    pub fn new(
+        tunnel_port: u16,
+        req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
+        shutdown: broadcast::Receiver<()>,
+    ) -> Self {
         Self {
             tunnel_port,
             req_rx,
+            shutdown,
         }
     }
 
-    #[instrument(name = "tunnel_client", skip_all, fields(port = %self.tunnel_port))]
-    pub async fn run(&self, mut shutdown: broadcast::Receiver<()>) -> Result<()> {
-        let sender = establish_h2_connection("localhost", self.tunnel_port, true).await?;
-        let send_req = sender.ready().await?;
+    #[instrument(name = "tunnel_client", skip_all, err, fields(port = %self.tunnel_port))]
+    pub async fn run(&mut self) -> Result<()> {
+        const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
+        const MAX_BACKOFF: Duration = Duration::from_secs(10);
+        let mut current_delay = INITIAL_BACKOFF;
 
-        loop {
-            let mut req_rx = self.req_rx.lock().await;
-            let mut interval = tokio::time::interval_at(
-                Instant::now() + Duration::from_secs(60),
-                Duration::from_secs(60),
-            );
+        'retry_loop: loop {
+            debug!("Attempting to establish H2 connection...");
 
-            tokio::select! {
-                Some(tunnel_req) = req_rx.recv() => self.handle_tunnel_request(send_req.clone(), tunnel_req).await,
-                _ = interval.tick() => self.heartbeat(send_req.clone()).await,
-                _ = shutdown.recv() => {
-                    debug!("tunnel shutdown");
-                    return Ok(())
+            let (sender, conn) = match establish_h2_connection("localhost", self.tunnel_port, true)
+                .await
+            {
+                Ok(res) => res,
+                Err(e) => {
+                    error!(error = ?e, "Failed to establish connection. Retrying in {:?}...", current_delay);
+
+                    tokio::select! {
+                        _ = sleep(current_delay) => {
+                            current_delay = (current_delay * 2).min(MAX_BACKOFF);
+                            continue 'retry_loop;
+                        }
+                        _ = self.shutdown.recv() => {
+                            debug!("Shutdown received while waiting to retry connection.");
+                            return Ok(());
+                        }
+                    }
+                }
+            };
+            tokio::pin!(conn);
+
+            let send_req = sender.ready().await?;
+
+            loop {
+                let mut req_rx = self.req_rx.lock().await;
+                let mut interval = tokio::time::interval_at(
+                    Instant::now() + Duration::from_secs(60),
+                    Duration::from_secs(60),
+                );
+
+                tokio::select! {
+                    res = &mut conn => {
+                        error!(error = ?res, "H2 connection task finished unexpectedly. Shutting down tunnel.");
+                        continue 'retry_loop;
+                    },
+                    Some(tunnel_req) = req_rx.recv() => self.handle_tunnel_request(send_req.clone(), tunnel_req).await,
+                    _ = interval.tick() => self.heartbeat(send_req.clone()).await,
+                    _ = self.shutdown.recv() => {
+                        debug!("Tunnel shutdown");
+                        return Ok(())
+                    }
                 }
             }
         }
@@ -128,7 +168,7 @@ pub async fn establish_h2_connection(
     host: &str,
     port: u16,
     use_tls: bool,
-) -> Result<SendRequest<Bytes>> {
+) -> Result<(SendRequest<Bytes>, ConnectionFuture)> {
     let tunnel_addr = format!("{}:{}", host, port);
     let stream = TcpStream::connect(tunnel_addr).await?;
     let keepalive = TcpKeepalive::new()
@@ -137,7 +177,7 @@ pub async fn establish_h2_connection(
     let sock_ref = SockRef::from(&stream);
     sock_ref.set_tcp_keepalive(&keepalive)?;
 
-    let sender = if use_tls {
+    Ok(if use_tls {
         let mut client_config = ClientConfig::builder()
             .dangerous()
             .with_custom_certificate_verifier(PmzCertVerifier::new())
@@ -150,15 +190,11 @@ pub async fn establish_h2_connection(
             .await?;
 
         let (sender, conn) = h2::client::handshake(tls_stream).await?;
-        tokio::spawn(conn);
-        sender
+        (sender, Box::pin(conn) as ConnectionFuture)
     } else {
         let (sender, conn) = h2::client::handshake(stream).await?;
-        tokio::spawn(conn);
-        sender
-    };
-
-    Ok(sender)
+        (sender, Box::pin(conn) as ConnectionFuture)
+    })
 }
 
 pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}

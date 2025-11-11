@@ -1,6 +1,6 @@
 use std::{net::Ipv4Addr, sync::Arc};
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use aya::maps::{HashMap, MapData};
 use common::{DnsQuery, DnsRecordA, MAX_DNS_NAME_LENGTH};
 use futures::StreamExt;
@@ -12,28 +12,36 @@ use kube::{
         watcher::{self, Event, watcher},
     },
 };
-use tokio::sync::{RwLock, broadcast};
+use tokio::sync::{
+    RwLock,
+    broadcast::{self, Receiver},
+};
 use tracing::{debug, error, info, instrument};
 
 use crate::connect::ConnectionStatus;
 
 pub struct Discovery {
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+    shutdown: Receiver<()>,
+    client: kube::Client,
 }
 
 impl Discovery {
-    pub fn new(service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>) -> Self {
-        Self { service_registry }
+    pub fn new(
+        service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
+        shutdown: broadcast::Receiver<()>,
+        client: kube::Client,
+    ) -> Self {
+        Self {
+            service_registry,
+            shutdown,
+            client,
+        }
     }
 
-    #[instrument(name = "discovery", skip_all)]
-    pub async fn watch(
-        &self,
-        client: kube::Client,
-        mut shutdown: broadcast::Receiver<()>,
-        connection_status: Arc<RwLock<ConnectionStatus>>,
-    ) -> Result<()> {
-        let api: Api<Service> = Api::all(client);
+    #[instrument(name = "discovery", skip_all, err)]
+    pub async fn watch(&mut self, connection_status: Arc<RwLock<ConnectionStatus>>) -> Result<()> {
+        let api: Api<Service> = Api::all(self.client.clone());
 
         let mut stream = watcher(api, watcher::Config::default())
             .default_backoff()
@@ -43,13 +51,17 @@ impl Discovery {
 
         loop {
             tokio::select! {
-                Some(next) = stream.next() => {
+                next = stream.next() => {
                     match next {
-                        Ok(event) => self.handle_service_event(event).await?,
-                        Err(e) => error!(error = ?e, "failed to get next event"),
+                        Some(Ok(event)) => self.handle_service_event(event).await?,
+                        Some(Err(e)) => error!(error = ?e, "failed to get next event"),
+                        None => {
+                            ConnectionStatus::discovery(&connection_status, false, "Down").await;
+                            bail!("Discovery watch stream ended unexpectedly")
+                        }
                     }
                 },
-                _ = shutdown.recv() => {
+                _ = self.shutdown.recv() => {
                     debug!("discovery shutdown");
                     self.clean_registry().await?;
                     ConnectionStatus::clear_discovery(&connection_status).await;
