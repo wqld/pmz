@@ -78,11 +78,14 @@ async fn main() -> Result<()> {
     let subs = Arc::new(RwLock::new(subs));
     let subs_clone = subs.clone();
 
+    let intercept_cache = Arc::new(RwLock::new(HashMap::new()));
+    let intercept_cache_clone = intercept_cache.clone();
+
     // discovery thread
     tokio::spawn(async move {
         debug!("Discovery!");
         let addr = SocketAddr::from(([0, 0, 0, 0], 50018));
-        let discovery_server = DiscoveryServer::new(subs_clone);
+        let discovery_server = DiscoveryServer::new(subs_clone, intercept_cache_clone);
         debug!("Discovery server is starting with {addr:?}");
 
         transport::Server::builder()
@@ -96,7 +99,7 @@ async fn main() -> Result<()> {
 
     // controller thread
     tokio::spawn(async move {
-        ctrl::run(subs_clone)
+        ctrl::run(subs_clone, intercept_cache)
             .await
             .expect("Failed to run InterceptRule controller");
     });
@@ -228,6 +231,10 @@ async fn main() -> Result<()> {
                         },
                     },
                 );
+
+                let finalizers = intercept_rule_cr.finalizers_mut();
+                finalizers.insert(0, "pmz.sinabro.io".to_owned());
+
                 let labels = intercept_rule_cr.labels_mut();
                 labels.insert(
                     "pmz.sinabro.io/service-name".to_string(),
@@ -261,10 +268,10 @@ async fn main() -> Result<()> {
             .default_backoff()
             .boxed();
 
-        loop {
-            let intercept_rule_map = intercept_rule_map_for_eps.clone();
-            let intercept_route_map = intercept_route_map_for_eps.clone();
+        let intercept_rule_map = intercept_rule_map_for_eps.clone();
+        let intercept_route_map = intercept_route_map_for_eps.clone();
 
+        loop {
             if let Some(next) = stream.next().await {
                 match next {
                     Ok(event) => match event {
@@ -300,7 +307,6 @@ async fn main() -> Result<()> {
                                                     let value = InterceptValue {
                                                         id: rule_value.id,
                                                         target_port: rule_value.target_port,
-                                                        // ..Default::default()
                                                     };
                                                     debug!(
                                                         "Try to add route to map with {:?}",

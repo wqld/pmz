@@ -1,12 +1,13 @@
 use std::{
     fs::Permissions,
+    net::IpAddr,
     os::{fd::OwnedFd, unix::fs::PermissionsExt},
     path::Path,
     sync::Arc,
 };
 
 use anyhow::Result;
-use cni::{CniAddEvent, ServiceIndex};
+use cni::{CniAddEvent, InterceptRuleCache, ServiceIndex};
 use ctrl::InterceptRule;
 use http::{Request, Response};
 use http_body_util::{BodyExt, Full};
@@ -21,6 +22,7 @@ use kube::{Api, Client, ResourceExt, api::ListParams, runtime::reflector::Store}
 use tokio::{
     fs::{File, create_dir_all, remove_file, set_permissions},
     net::UnixListener,
+    sync::{RwLock, broadcast},
 };
 use tracing::{Instrument, debug, error, info, instrument};
 
@@ -30,14 +32,21 @@ pub struct CniServer {
     config: Config,
     service_index: ServiceIndex,
     service_store: Store<Service>,
+    intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>,
 }
 
 impl CniServer {
-    pub fn new(config: Config, service_index: ServiceIndex, service_store: Store<Service>) -> Self {
+    pub fn new(
+        config: Config,
+        service_index: ServiceIndex,
+        service_store: Store<Service>,
+        intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>,
+    ) -> Self {
         Self {
             config,
             service_index,
             service_store,
+            intercept_rule_cache,
         }
     }
 
@@ -68,6 +77,7 @@ impl CniServer {
             let service_index = self.service_index.clone();
             let service_store = self.service_store.clone();
             let intercept_gate_url = self.config.intercept_gate_addr.clone();
+            let intercept_rule_cache = self.intercept_rule_cache.clone();
 
             tokio::spawn(
                 async move {
@@ -80,6 +90,7 @@ impl CniServer {
                                     service_index.clone(),
                                     service_store.clone(),
                                     intercept_gate_url.clone(),
+                                    intercept_rule_cache.clone(),
                                 )
                             }),
                         )
@@ -106,6 +117,7 @@ impl CniServer {
         svc_index: ServiceIndex,
         svc_store: Store<Service>,
         intercept_gate_addr: String,
+        intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>,
     ) -> Result<Response<Full<Bytes>>> {
         let body = req.collect().await?.aggregate();
         let event: CniAddEvent = serde_json::from_reader(body.reader())?;
@@ -126,7 +138,6 @@ impl CniServer {
         let services = k8s::find_services_for_pod(&pod, svc_index, svc_store).await?;
 
         let ir_api: Api<InterceptRule> = Api::all(client.clone());
-        let mut intercept_rules = vec![];
 
         debug!(
             services = services.len(),
@@ -141,35 +152,57 @@ impl CniServer {
             );
             let lp = ListParams::default().labels(&label_selector);
 
-            if let Ok(obj_list) = ir_api.list(&lp).await {
-                intercept_rules.extend(obj_list);
-            }
-        }
+            if let Ok(intercept_rule_list) = ir_api.list(&lp).await {
+                for intercept_rule in intercept_rule_list {
+                    let rule_id = format!(
+                        "{}/{}",
+                        intercept_rule.namespace().unwrap_or("default".to_string()),
+                        intercept_rule.name_any()
+                    );
 
-        if !intercept_rules.is_empty() {
-            debug!(
-                count = intercept_rules.len(),
-                "Found matching intercept rules"
-            );
+                    let self_netns_path = "/proc/self/ns/net";
+                    let current_netns = File::open(self_netns_path).await?;
+                    let current_netns: Arc<OwnedFd> =
+                        Arc::new(current_netns.into_std().await.into());
 
-            let self_netns_path = "/proc/self/ns/net";
-            let current_netns = File::open(self_netns_path).await?;
-            let current_netns: Arc<OwnedFd> = Arc::new(current_netns.into_std().await.into());
+                    let (stop_tx, _) = broadcast::channel::<()>(1);
 
-            for ip_config in event.ips {
-                let addr_str = ip_config.address.split('/').next().unwrap_or_default();
-                let pod_ip = addr_str.parse()?;
-                let target_netns_path = format!("/host{}", event.netns);
-                let target_netns = File::open(target_netns_path).await?;
-                let target_netns_fd = target_netns.into_std().await.into();
+                    let pod_ips: Vec<IpAddr> = event
+                        .ips
+                        .iter()
+                        .map(|c| c.address.split('/').next().unwrap_or_default())
+                        .filter_map(|s| s.parse().ok())
+                        .collect();
 
-                setup_inpod_redirection(
-                    pod_ip,
-                    &intercept_gate_addr,
-                    current_netns.clone(),
-                    Some(target_netns_fd),
-                )
-                .await?;
+                    debug!(?rule_id, ?pod_ips, "Try to set in-pod redirection");
+
+                    {
+                        let mut cache = intercept_rule_cache.write().await;
+                        // cache.insert(rule_id, (pod_ips.clone(), stop_tx));
+                        match cache.insert(rule_id.clone(), (pod_ips.clone(), stop_tx)) {
+                            Some((old_pod_ips, _)) => {
+                                debug!(?rule_id, ?old_pod_ips, ?pod_ips, "Inserted");
+                            }
+                            None => {
+                                debug!(?rule_id, ?pod_ips, "Newerly Inserted");
+                            }
+                        }
+                    }
+
+                    for pod_ip in pod_ips {
+                        let target_netns_path = format!("/host{}", event.netns);
+                        let target_netns = File::open(target_netns_path).await?;
+                        let target_netns_fd = target_netns.into_std().await.into();
+
+                        setup_inpod_redirection(
+                            pod_ip,
+                            &intercept_gate_addr,
+                            current_netns.clone(),
+                            Some(target_netns_fd),
+                        )
+                        .await?;
+                    }
+                }
             }
         }
 

@@ -38,6 +38,20 @@ pub async fn setup_inpod_redirection(
     Ok(())
 }
 
+#[instrument(name = "stop_inpod_redirection", skip_all, fields(%pod_ip))]
+pub async fn stop_inpod_redirection(pod_ip: IpAddr, current_netns: Arc<OwnedFd>) -> Result<()> {
+    let target_netns = resolve_target_netns(pod_ip, current_netns, None).await?;
+
+    if let Some(inpod_netns) = target_netns {
+        debug!("Found target netns: {:?}", inpod_netns);
+        inpod_netns.run(|| cleanup_inpod_iptables_rules())?;
+    } else {
+        error!(pod_ip = %pod_ip, "Could not find target netns");
+    }
+
+    Ok(())
+}
+
 #[instrument(skip_all, err)]
 async fn resolve_target_netns(
     pod_ip: IpAddr,
@@ -283,6 +297,16 @@ fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
         vec![
             "-t",
             "nat",
+            "-D",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "-j",
+            intercept_chain,
+        ],
+        vec![
+            "-t",
+            "nat",
             "-A",
             "PREROUTING",
             "-p",
@@ -346,11 +370,20 @@ fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            let op = rule.get(2).map(|s| *s);
 
-            if rule.get(2) == Some(&"-N") && stderr.contains("Chain already exists") {
+            if op == Some("-N") && stderr.contains("Chain already exists") {
                 debug!(
                     "Chain '{}' already exists, which is safe to ignore.",
                     rule[3]
+                );
+                continue;
+            }
+
+            if op == Some("-D") && stderr.contains("No chain/target/match") {
+                debug!(
+                    "Rule to delete not found, which is safe to ignore: {:?}",
+                    &rule
                 );
                 continue;
             }
@@ -365,5 +398,57 @@ fn setup_inpod_iptables_rule(addr: SocketAddr) -> Result<()> {
     }
 
     info!("Successfully applied iptables INTERCEPT rules.");
+    Ok(())
+}
+
+#[instrument(skip_all)]
+fn cleanup_inpod_iptables_rules() -> Result<()> {
+    let intercept_chain = "PMZ_INTERCEPT";
+
+    let cleanup_rules = vec![
+        vec![
+            "-t",
+            "nat",
+            "-D",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "-j",
+            intercept_chain,
+        ],
+        vec!["-t", "nat", "-F", intercept_chain],
+        vec!["-t", "nat", "-X", intercept_chain],
+    ];
+
+    info!("Cleaning up iptables INTERCEPT rules...");
+
+    for rule in cleanup_rules {
+        let mut command = std::process::Command::new("iptables");
+        command.args(&rule);
+
+        let output = command.output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if stderr.contains("No chain/target/match") || stderr.contains("No chain by that name")
+            {
+                debug!(
+                    "Rule/chain to clean up not found, which is fine: {:?}",
+                    &rule
+                );
+                continue;
+            }
+
+            bail!(
+                "Iptables cleanup command failed: {:?}, status: {}, stderr: {}",
+                &rule,
+                output.status,
+                stderr
+            );
+        }
+    }
+
+    info!("Successfully cleaned up iptables INTERCEPT rules.");
     Ok(())
 }
