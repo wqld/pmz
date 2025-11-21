@@ -3,16 +3,45 @@ syntax = "proto3";
 package intercept;
 
 service InterceptDiscovery {
-  rpc Intercepts(DiscoveryRequest) returns (stream DiscoveryResponse) {}
+  rpc Intercepts(stream DiscoveryRequest) returns (stream DiscoveryResponse) {}
 }
 
 message DiscoveryRequest {
-  string node_ip = 1;
+  oneof payload {
+    PdsHello hello = 1;
+    Ack ack = 2;
+  }
 }
 
 message DiscoveryResponse {
-  string version_info = 1;
-  repeated InterceptEndpoint resources = 2;
+  oneof payload {
+    AddIntercept add = 1;
+    RemoveIntercept remove = 2;
+    SnapshotSent snapshot_sent = 3;
+  }
+}
+
+message PdsHello {
+  string node_ip = 1;
+  string revision = 2;
+}
+
+message Ack {
+  string uid = 1;
+  string error = 2;
+}
+
+message AddIntercept {
+  string uid = 1;
+  InterceptEndpoint endpoint = 2;
+}
+
+message RemoveIntercept {
+  string uid = 1;
+}
+
+message SnapshotSent {
+  string revision = 1;
 }
 
 message InterceptEndpoint {

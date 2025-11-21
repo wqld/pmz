@@ -1,13 +1,16 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt::{self, Display, Formatter},
+    net::IpAddr,
     sync::Arc,
 };
 
 use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
+
+pub type InterceptRuleCache = HashMap<String, (Vec<IpAddr>, broadcast::Sender<()>)>;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]

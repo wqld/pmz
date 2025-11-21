@@ -113,7 +113,7 @@ impl Discovery {
 
         Ok(DnsRecordA {
             ip: u32::from(ipv4),
-            ttl: 30,
+            ttl: 5,
         })
     }
 

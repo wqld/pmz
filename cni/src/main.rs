@@ -1,7 +1,10 @@
+use std::{collections::HashMap, sync::Arc};
+
 use anyhow::Result;
 use clap::Parser;
 
 use kube::Client;
+use tokio::sync::RwLock;
 use tracing::{error, info};
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -40,13 +43,16 @@ async fn main() -> Result<()> {
     let config = config::Config::load()?;
     let client = Client::try_default().await?;
 
+    let intercept_rule_cache = Arc::new(RwLock::new(HashMap::new()));
+
     let patcher = CniPatcher::new(&config.cni_conf_dir);
-    let discovery = Discovery::new(config.clone());
+    let discovery = Discovery::new(config.clone(), intercept_rule_cache.clone());
     let service_watcher = ServiceWatcher::new(client.clone());
     let cni_server = CniServer::new(
         config.clone(),
         service_watcher.index(),
         service_watcher.store(),
+        intercept_rule_cache.clone(),
     );
 
     patcher.patch().await?;

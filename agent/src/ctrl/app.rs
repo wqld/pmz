@@ -15,11 +15,18 @@ use kube::{
         watcher,
     },
 };
-use proto::{InterceptEndpoint, PodIdentifier};
+use proto::{
+    AddIntercept, DiscoveryResponse, InterceptEndpoint, PodIdentifier, RemoveIntercept,
+    discovery_response::Payload as RespPayload,
+};
 use serde_json::json;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use crate::DiscovertTx;
 
@@ -27,10 +34,12 @@ use crate::DiscovertTx;
 struct State {
     client: Client,
     subscribers: Arc<RwLock<HashMap<String, DiscovertTx>>>,
+    intercept_cache: Arc<RwLock<HashMap<String, HashMap<String, AddIntercept>>>>,
 }
 
 pub async fn run(
     subscribers: Arc<RwLock<HashMap<String, DiscovertTx>>>,
+    intercept_cache: Arc<RwLock<HashMap<String, HashMap<String, AddIntercept>>>>,
 ) -> Result<(), kube::Error> {
     let client = Client::try_default().await?;
     let intercept_rules = Api::<InterceptRule>::all(client.clone());
@@ -38,6 +47,7 @@ pub async fn run(
     let state = State {
         client: client.clone(),
         subscribers,
+        intercept_cache,
     };
 
     Controller::new(intercept_rules, watcher::Config::default())
@@ -58,8 +68,6 @@ async fn reconcile(rule: Arc<InterceptRule>, ctx: Arc<State>) -> Result<Action> 
     let namespace = rule.namespace().unwrap_or("default".to_owned());
     let rule_name = rule.name_any();
     info!("Reconcile request received for InterceptRule '{namespace}/{rule_name}'");
-
-    // TODO if rule.metadata.deletion_timestamp.is_some() {}
 
     let result = try_reconcile(rule.clone(), ctx.clone(), &namespace, &rule_name).await;
 
@@ -92,6 +100,63 @@ async fn try_reconcile(
     namespace: &str,
     rule_name: &str,
 ) -> anyhow::Result<Action> {
+    let rule_id = format!("{}/{}", namespace, rule_name);
+
+    if rule.metadata.deletion_timestamp.is_some() {
+        info!("Rule: {rule_id}, Deletion detected. Processing removal.");
+
+        let mut affected_nodes = Vec::new();
+        {
+            let mut cache = ctx.intercept_cache.write().await;
+            for (node_ip, rules) in cache.iter_mut() {
+                if rules.remove(&rule_id).is_some() {
+                    affected_nodes.push(node_ip.clone());
+                }
+            }
+        }
+
+        let remove_msg = DiscoveryResponse {
+            payload: Some(RespPayload::Remove(RemoveIntercept {
+                uid: rule_id.clone(),
+            })),
+        };
+
+        let subs = ctx.subscribers.read().await;
+        for node_ip in affected_nodes {
+            if let Some(tx) = subs.get(&node_ip) {
+                if tx.send(Ok(remove_msg.clone())).await.is_err() {
+                    debug!(
+                        "Subscriber {node_ip} disconnected before remove update (already handled by server)"
+                    );
+                }
+            }
+        }
+
+        let finalizer_name = "pmz.sinabro.io";
+        info!("Rule: {rule_id}, Removing finalizer '{finalizer_name}'.");
+        let rules_api: Api<InterceptRule> = Api::namespaced(ctx.client.clone(), namespace);
+
+        let new_finalizers: Vec<String> = rule
+            .metadata
+            .finalizers
+            .as_ref()
+            .map_or_else(Vec::new, |v| {
+                v.iter().filter(|&s| s != finalizer_name).cloned().collect()
+            });
+
+        let patch = json!({
+            "metadata": {
+                "finalizers": new_finalizers
+            }
+        });
+
+        rules_api
+            .patch(rule_name, &PatchParams::default(), &Patch::Merge(&patch))
+            .await?;
+
+        return Ok(Action::await_change());
+    }
+
     let services = Api::<Service>::namespaced(ctx.client.clone(), namespace);
 
     let service_name = &rule.spec.r#match.service;
@@ -168,66 +233,84 @@ async fn try_reconcile(
         namespace, rule_name, intercept_endpoint
     );
 
-    process_and_notify(&ctx, &intercept_endpoint).await
-}
-
-async fn process_and_notify(
-    ctx: &Arc<State>,
-    intercept_endpoint: &proto::InterceptEndpoint,
-) -> anyhow::Result<Action> {
-    let mut pods_by_host_ip: HashMap<String, Vec<PodIdentifier>> = HashMap::new();
+    let mut pods_by_node_ip: HashMap<String, Vec<PodIdentifier>> = HashMap::new();
 
     for pod_identifier in intercept_endpoint.pod_ids.iter() {
         let key = pod_identifier.host_ip.clone();
-        pods_by_host_ip
+        pods_by_node_ip
             .entry(key)
             .or_default()
             .push(pod_identifier.clone());
     }
 
     let subs = ctx.subscribers.read().await;
-    let mut any_subscriber_missing = false;
+    let mut cache = ctx.intercept_cache.write().await;
 
-    for (host_ip_key, pods_for_this_host) in pods_by_host_ip {
-        if let Some(subscriber_tx) = subs.get(&host_ip_key) {
-            let resource_for_subscriber = proto::InterceptEndpoint {
-                pod_ids: pods_for_this_host,
-                namespace: intercept_endpoint.namespace.clone(),
-                target_port: intercept_endpoint.target_port,
+    let mut nodes_sent = HashSet::new();
+
+    for (node_ip, pods_from_node) in pods_by_node_ip {
+        let resource_for_subscriber = InterceptEndpoint {
+            pod_ids: pods_from_node,
+            namespace: intercept_endpoint.namespace.clone(),
+            target_port: intercept_endpoint.target_port,
+        };
+
+        let add_msg = AddIntercept {
+            uid: rule_id.clone(),
+            endpoint: Some(resource_for_subscriber),
+        };
+
+        cache
+            .entry(node_ip.clone())
+            .or_default()
+            .insert(rule_id.clone(), add_msg.clone());
+
+        nodes_sent.insert(node_ip.clone());
+
+        if let Some(subscriber_tx) = subs.get(&node_ip) {
+            let resp = DiscoveryResponse {
+                payload: Some(RespPayload::Add(add_msg)),
             };
 
-            let resp = proto::DiscoveryResponse {
-                version_info: "v1.0-alpha".to_string(),
-                resources: vec![resource_for_subscriber],
-            };
-
-            debug!(
-                "Sending update to subscriber at {}: {:?}",
-                host_ip_key, resp
-            );
-
-            if let Err(e) = subscriber_tx.send(Ok(resp.clone())).await {
-                error!(
-                    "Failed to send message to subscriber {}: {}",
-                    host_ip_key, e
+            if subscriber_tx.send(Ok(resp.clone())).await.is_err() {
+                debug!(
+                    "Subscriber {node_ip} disconnected before add update (already handled by server)"
                 );
             }
         } else {
-            warn!(
-                "No active subscriber found for host IP: {}. Update not delivered.",
-                host_ip_key
-            );
-            any_subscriber_missing = true;
+            debug!("No active subscriber for {node_ip}. Update cached for next connection.");
         }
     }
 
-    if any_subscriber_missing {
-        debug!("One or more subscribers were missing for this endpoint, requesting short requeue.");
-        Ok(Action::requeue(Duration::from_secs(5)))
-    } else {
-        debug!("All found subscribers notified (or send attempted). Requesting long requeue.");
-        Ok(Action::requeue(Duration::from_secs(3600)))
+    let mut nodes_to_remove = Vec::new();
+    for (node_ip, rules) in cache.iter_mut() {
+        if !nodes_sent.contains(node_ip) && rules.remove(&rule_id).is_some() {
+            nodes_to_remove.push(node_ip.clone());
+        }
     }
+
+    if !nodes_to_remove.is_empty() {
+        let remove_msg = DiscoveryResponse {
+            payload: Some(RespPayload::Remove(RemoveIntercept {
+                uid: rule_id.clone(),
+            })),
+        };
+
+        for node_ip in nodes_to_remove {
+            debug!("Rule: {rule_id}, Removing from node {node_ip} (no longer matches).");
+            if let Some(tx) = subs.get(&node_ip) {
+                if tx.send(Ok(remove_msg.clone())).await.is_err() {
+                    debug!(
+                        "Subscriber {node_ip} disconnected before diff remove update (already handled by server)"
+                    );
+                }
+            }
+        }
+    }
+
+    debug!("Rule: {rule_id}, Reconciliation complete.");
+
+    Ok(Action::requeue(Duration::from_secs(3600)))
 }
 
 fn create_owner_reference(svc: &Service) -> Result<OwnerReference> {
