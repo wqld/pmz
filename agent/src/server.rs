@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::SocketAddr, sync::Arc};
+use std::{collections::HashMap, net::SocketAddr, str::FromStr, sync::Arc};
 
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -18,13 +18,13 @@ use uuid::Uuid;
 const DIAL_PREFACE: &[u8] = b"dial-preface-from-agent";
 
 #[derive(Clone)]
-struct AppState {
+struct TunnelState {
     dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
     stream_map: Arc<Mutex<HashMap<InterceptRequest, TcpStream>>>,
     intercept_rule_tx: mpsc::Sender<(InterceptRuleKey, InterceptValue)>,
 }
 
-impl AppState {
+impl TunnelState {
     fn new(
         dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
         intercept_rule_tx: mpsc::Sender<(InterceptRuleKey, InterceptValue)>,
@@ -39,9 +39,7 @@ impl AppState {
 
 pub struct InterceptTunnel {
     port: u16,
-    state: AppState,
-    // dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
-    // intercept_rule_tx: Arc<Mutex<mpsc::Sender<(InterceptRuleKey, InterceptValue)>>>,
+    state: TunnelState,
 }
 
 impl InterceptTunnel {
@@ -52,7 +50,7 @@ impl InterceptTunnel {
     ) -> Self {
         Self {
             port,
-            state: AppState::new(dial_map, intercept_rule_tx),
+            state: TunnelState::new(dial_map, intercept_rule_tx),
         }
     }
 
@@ -62,15 +60,9 @@ impl InterceptTunnel {
         let listener = TcpListener::bind(addr).await?;
         info!("Listening on {}", addr);
 
-        // let stream_map = Arc::new(Mutex::new(HashMap::new()));
-
         loop {
             if let Ok((stream, peer_addr)) = listener.accept().await {
                 let state = self.state.clone();
-
-                // let req_rx = self.dial_map.clone();
-                // let intercept_rule_tx = self.intercept_rule_tx.clone();
-                // let stream_map = stream_map.clone();
 
                 tokio::spawn(
                     async move {
@@ -87,23 +79,13 @@ impl InterceptTunnel {
 }
 
 #[instrument(skip_all)]
-async fn serve(
-    stream: TcpStream,
-    state: AppState,
-    // dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
-    // intercept_rule_tx: Arc<Mutex<mpsc::Sender<(InterceptRuleKey, InterceptValue)>>>,
-    // stream_map: Arc<Mutex<HashMap<InterceptRequest, TcpStream>>>,
-) -> Result<()> {
+async fn serve(stream: TcpStream, state: TunnelState) -> Result<()> {
     let mut connection = h2::server::handshake(stream).await?;
     debug!("h2 connection bound");
 
     while let Some(result) = connection.accept().await {
         let (resp, send) = result?;
         let state = state.clone();
-
-        // let dial_map = dial_map.clone();
-        // let intercept_rule_tx = intercept_rule_tx.clone();
-        // let stream_map = stream_map.clone();
 
         tokio::spawn(
             async move {
@@ -130,10 +112,7 @@ async fn serve(
 async fn handle_request(
     req: Request<RecvStream>,
     mut send: SendResponse<Bytes>,
-    state: AppState,
-    // dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
-    // intercept_rule_tx: Arc<Mutex<mpsc::Sender<(InterceptRuleKey, InterceptValue)>>>,
-    // stream_map: Arc<Mutex<HashMap<InterceptRequest, TcpStream>>>,
+    state: TunnelState,
 ) -> Result<()> {
     debug!("Got request");
 
@@ -155,12 +134,16 @@ async fn handle_request(
 async fn dial(
     req: Request<RecvStream>,
     mut send: SendResponse<Bytes>,
-    state: AppState,
-    // dial_map: Arc<Mutex<HashMap<Uuid, mpsc::Sender<DialRequest>>>>,
-    // intercept_rule_tx: Arc<Mutex<mpsc::Sender<(InterceptRuleKey, InterceptValue)>>>,
-    // stream_map: Arc<Mutex<HashMap<InterceptRequest, TcpStream>>>,
+    state: TunnelState,
 ) -> Result<()> {
     debug!("Call dial");
+
+    let requested_uuid = req
+        .headers()
+        .get("x-pmz-daemon-id")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::from_str(v).ok());
+
     let mut body = req.into_body();
 
     // check the preface
@@ -179,7 +162,11 @@ async fn dial(
 
     // generate an uuid and store a channel for this seesion,
     // keyed by the generated uuid
-    let uuid = Uuid::now_v7();
+    let uuid = match requested_uuid {
+        Some(id) => id,
+        None => Uuid::now_v7(),
+    };
+
     let (dial_tx, dial_rx) = mpsc::channel::<DialRequest>(1);
     {
         state.dial_map.lock().await.insert(uuid, dial_tx);
@@ -300,8 +287,7 @@ async fn handle_dial_requests(
 async fn intercept(
     req: Request<RecvStream>,
     mut send: SendResponse<Bytes>,
-    state: AppState,
-    // stream_map: Arc<Mutex<HashMap<InterceptRequest, TcpStream>>>,
+    state: TunnelState,
 ) -> Result<()> {
     debug!("Call intercept");
     let mut recv = req.into_body();

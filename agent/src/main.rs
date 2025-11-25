@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 
@@ -8,14 +8,12 @@ use clap::Parser;
 use ::ctrl::{ForwardTo, InterceptRule, InterceptRuleSpec, Match};
 use ::proxy::tunnel;
 use ::proxy::tunnel::server::TunnelServer;
-use discovery::DiscoveryServer;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Service;
 use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::{ListParams, Patch, PatchParams};
 use kube::runtime::{WatchStreamExt, watcher};
 use kube::{Api, ResourceExt};
-use proto::intercept_discovery_server::InterceptDiscoveryServer;
 use proxy::{
     DialRequest, InterceptRouteKey, InterceptRouteMap, InterceptRuleKey, InterceptRuleMap,
     InterceptValue,
@@ -24,7 +22,6 @@ use server::InterceptTunnel;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpListener;
 use tokio::sync::{Mutex, RwLock, mpsc};
-use tonic::{Status, transport};
 use tracing::{debug, error, info};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -32,10 +29,7 @@ use tracing_subscriber::{EnvFilter, fmt};
 use uuid::Uuid;
 
 mod ctrl;
-mod discovery;
 mod server;
-
-type DiscovertTx = mpsc::Sender<Result<proto::DiscoveryResponse, Status>>;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -74,36 +68,6 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     info!(?args, "Starting pmz-agent with parsed arguments");
 
-    let subs = HashMap::new();
-    let subs = Arc::new(RwLock::new(subs));
-    let subs_clone = subs.clone();
-
-    let intercept_cache = Arc::new(RwLock::new(HashMap::new()));
-    let intercept_cache_clone = intercept_cache.clone();
-
-    // discovery thread
-    tokio::spawn(async move {
-        debug!("Discovery!");
-        let addr = SocketAddr::from(([0, 0, 0, 0], 50018));
-        let discovery_server = DiscoveryServer::new(subs_clone, intercept_cache_clone);
-        debug!("Discovery server is starting with {addr:?}");
-
-        transport::Server::builder()
-            .add_service(InterceptDiscoveryServer::new(discovery_server))
-            .serve(addr)
-            .await
-            .unwrap()
-    });
-
-    let subs_clone = subs.clone();
-
-    // controller thread
-    tokio::spawn(async move {
-        ctrl::run(subs_clone, intercept_cache)
-            .await
-            .expect("Failed to run InterceptRule controller");
-    });
-
     let dial_map: HashMap<Uuid, mpsc::Sender<DialRequest>> = HashMap::new();
     let dial_map = Arc::new(Mutex::new(dial_map));
     let dial_map_for_gate = dial_map.clone();
@@ -112,6 +76,7 @@ async fn main() -> Result<()> {
     let intercept_rule_map = Arc::new(RwLock::new(intercept_rule_map));
     // let intercept_rule_map_for_svc = intercept_rule_map.clone();
     let intercept_rule_map_for_eps = intercept_rule_map.clone();
+    // let intercept_rule_map_for_ctrl = intercept_rule_map.clone();
 
     let intercept_route_map = InterceptRouteMap::default();
     let intercept_route_map = Arc::new(RwLock::new(intercept_route_map));
@@ -121,6 +86,49 @@ async fn main() -> Result<()> {
 
     let (intercept_rule_tx, mut intercept_rule_rx) =
         mpsc::channel::<(InterceptRuleKey, InterceptValue)>(1);
+
+    let client = kube::Client::try_default().await?;
+
+    {
+        debug!("Initializing intercept_rule_map from existing CRs...");
+
+        let rule_api: Api<InterceptRule> = Api::all(client.clone());
+
+        match rule_api.list(&ListParams::default()).await {
+            Ok(rules) => {
+                let mut map_guard = intercept_rule_map.write().await;
+
+                for rule in rules {
+                    let service_name = rule.spec.r#match.service.clone();
+                    let port = rule.spec.r#match.port;
+                    let namespace = rule.metadata.namespace.unwrap_or_else(|| "default".into());
+
+                    let key = InterceptRuleKey {
+                        namespace,
+                        service: service_name,
+                        port,
+                    };
+
+                    let rule_id = rule.spec.forward_to.id.parse().unwrap_or_default();
+
+                    let value = InterceptValue {
+                        id: rule_id,
+                        target_port: rule.spec.forward_to.port,
+                    };
+
+                    debug!("Restored intercept rule: {key:?} -> {value:?}");
+                    map_guard.insert(key, value);
+                }
+                info!(
+                    "Successfully initialized intercept_rule_map with {} rules.",
+                    map_guard.len()
+                );
+            }
+            Err(e) => {
+                error!(?e, "Failed to initialize intercept_rule_map from CRs");
+            }
+        }
+    }
 
     // let client = kube::Client::try_default().await?;
     // let ssapply = PatchParams::apply("pmz-agent").force();
@@ -139,6 +147,13 @@ async fn main() -> Result<()> {
     //     conditions::is_crd_established(),
     // );
     // let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish).await?;
+
+    // controller thread
+    // tokio::spawn(async move {
+    //     ctrl::run(intercept_rule_map_for_ctrl)
+    //         .await
+    //         .expect("Failed to run InterceptRule controller");
+    // });
 
     // intercept rule thread
     tokio::spawn(async move {
@@ -232,8 +247,8 @@ async fn main() -> Result<()> {
                     },
                 );
 
-                let finalizers = intercept_rule_cr.finalizers_mut();
-                finalizers.insert(0, "pmz.sinabro.io".to_owned());
+                // let finalizers = intercept_rule_cr.finalizers_mut();
+                // finalizers.insert(0, "pmz.sinabro.io".to_owned());
 
                 let labels = intercept_rule_cr.labels_mut();
                 labels.insert(
@@ -262,7 +277,7 @@ async fn main() -> Result<()> {
     // endpointSlice watcher
     tokio::spawn(async move {
         let client = kube::Client::try_default().await.unwrap();
-        let eps: Api<EndpointSlice> = Api::all(client);
+        let eps: Api<EndpointSlice> = Api::all(client.clone());
 
         let mut stream = watcher(eps, watcher::Config::default())
             .default_backoff()
@@ -270,6 +285,10 @@ async fn main() -> Result<()> {
 
         let intercept_rule_map = intercept_rule_map_for_eps.clone();
         let intercept_route_map = intercept_route_map_for_eps.clone();
+
+        // Key: (Namespace, ServiceName), Value: Set of RouteKeys(IP+Port)
+        let mut managed_keys_cache: HashMap<(String, String), HashSet<InterceptRouteKey>> =
+            HashMap::new();
 
         loop {
             if let Some(next) = stream.next().await {
@@ -283,7 +302,10 @@ async fn main() -> Result<()> {
                                 .and_then(|owners| owners.first())
                             {
                                 let service_name = &owner.name;
-                                let namespace = eps.namespace().unwrap_or_default();
+                                let namespace = eps.namespace().unwrap_or("default".to_string());
+                                let cache_key = (namespace.clone(), service_name.clone());
+
+                                let mut new_keys = HashSet::new();
 
                                 if let Some(eps_ports) = eps.ports {
                                     for eps_port in eps_ports {
@@ -304,14 +326,15 @@ async fn main() -> Result<()> {
                                                         ip: ip.into(),
                                                         port: rule_key.port,
                                                     };
+
+                                                    new_keys.insert(key.clone());
+
                                                     let value = InterceptValue {
                                                         id: rule_value.id,
                                                         target_port: rule_value.target_port,
                                                     };
-                                                    debug!(
-                                                        "Try to add route to map with {:?}",
-                                                        key
-                                                    );
+
+                                                    debug!("Adding route: {key:?}");
 
                                                     intercept_route_map
                                                         .write()
@@ -322,9 +345,45 @@ async fn main() -> Result<()> {
                                         }
                                     }
                                 }
+
+                                if let Some(old_keys) = managed_keys_cache.get(&cache_key) {
+                                    let keys_to_remove: Vec<_> =
+                                        old_keys.difference(&new_keys).cloned().collect();
+
+                                    if !keys_to_remove.is_empty() {
+                                        let mut route_map_guard = intercept_route_map.write().await;
+
+                                        for key in keys_to_remove {
+                                            debug!("Removing stale route: {:?}", key);
+                                            route_map_guard.remove(&key);
+                                        }
+                                    }
+                                }
+
+                                managed_keys_cache.insert(cache_key, new_keys);
                             }
                         }
-                        watcher::Event::Delete(_eps) => todo!(),
+                        watcher::Event::Delete(eps) => {
+                            if let Some(owner) = eps
+                                .metadata
+                                .owner_references
+                                .as_ref()
+                                .and_then(|o| o.first())
+                            {
+                                let cache_key = (
+                                    eps.namespace().unwrap_or("default".to_string()),
+                                    owner.name.clone(),
+                                );
+
+                                if let Some(old_keys) = managed_keys_cache.remove(&cache_key) {
+                                    let mut map_guard = intercept_route_map.write().await;
+                                    for key in old_keys {
+                                        debug!("EndpointSlice deleted, removing route: {:?}", key);
+                                        map_guard.remove(&key);
+                                    }
+                                }
+                            }
+                        }
                         _ => {}
                     },
                     Err(e) => {
@@ -369,14 +428,6 @@ async fn main() -> Result<()> {
                 target_ip, target_port
             );
 
-            // // TODO retrieve the target ip & port from the header
-            // let (ip, port) = {
-            //     let target_ip = 174126728; // u32::from_be(echo service's cluster ip);
-            //     let target_port = 80; // u16::from_be(0);
-
-            //     (target_ip, target_port)
-            // };
-
             // get the uuid associated with the origin from the intercept_route_map
             let key = InterceptRouteKey { ip, port };
             debug!("Try to get route from map with {:?}", key);
@@ -392,10 +443,10 @@ async fn main() -> Result<()> {
                             };
                             tx.send(dial_req).await.unwrap();
                         }
-                        None => todo!(),
+                        None => error!(?id, "Failed to find DialRequest"),
                     }
                 }
-                None => todo!(),
+                None => error!(?key, "Failed to find InterceptRoute"),
             }
         }
     });

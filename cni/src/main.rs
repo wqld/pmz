@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let intercept_rule_cache = Arc::new(RwLock::new(HashMap::new()));
 
     let patcher = CniPatcher::new(&config.cni_conf_dir);
-    let discovery = Discovery::new(config.clone(), intercept_rule_cache.clone());
+    let discovery = Discovery::new(config.clone(), client.clone(), intercept_rule_cache.clone());
     let service_watcher = ServiceWatcher::new(client.clone());
     let cni_server = CniServer::new(
         config.clone(),
@@ -57,17 +57,16 @@ async fn main() -> Result<()> {
 
     patcher.patch().await?;
 
-    let discovery_future = discovery.run();
-    let server_future = cni_server.run();
-    let watcher_future = service_watcher.run();
+    let discovery_handle = tokio::spawn(async move { discovery.run().await });
+    let watcher_handle = tokio::spawn(async move { service_watcher.run().await });
+    let server_handle = tokio::spawn(async move { cni_server.run().await });
 
     info!("All components are running concurrently.");
 
     tokio::select! {
-        _ = discovery_future => error!("Discovery client task has terminated."),
-        _ = watcher_future => error!("Kubernetes service watcher task has terminated."),
-        _ = server_future => error!("CNI server task has terminated."),
-
+        _ = discovery_handle=> error!("Discovery client task has terminated."),
+        _ = watcher_handle => error!("Kubernetes service watcher task has terminated."),
+        _ = server_handle => error!("CNI server task has terminated."),
     }
 
     info!("PMZ CNI is shutting down due to a critical task failure.");

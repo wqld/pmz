@@ -17,7 +17,6 @@ pub struct Config {
     pub cni_conf_dir: String,
     pub namespace: String,
     pub host_ip: String,
-    pub discovery_url: String,
     pub intercept_gate_addr: String,
     pub cni_socket_path: String,
 }
@@ -31,7 +30,6 @@ impl Config {
         Ok(Self {
             iface: args.iface,
             cni_conf_dir: args.cni_conf_dir,
-            discovery_url: format!("http://pmz-agent.{}.svc:50018", namespace),
             intercept_gate_addr: format!("pmz-agent.{}.svc.cluster.local:18326", namespace),
             namespace,
             host_ip,

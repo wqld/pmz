@@ -358,12 +358,6 @@ impl<'a> Deploy<'a> {
                         ..Default::default()
                     },
                     ServicePort {
-                        name: Some("grpc".to_string()),
-                        protocol: Some("TCP".to_string()),
-                        port: 50018,
-                        ..Default::default()
-                    },
-                    ServicePort {
                         name: Some("gate".to_string()),
                         protocol: Some("TCP".to_string()),
                         port: 18326,

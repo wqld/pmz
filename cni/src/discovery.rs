@@ -1,311 +1,268 @@
-use std::{net::IpAddr, os::fd::OwnedFd, sync::Arc, time::Duration};
+use std::{collections::HashSet, net::IpAddr, os::fd::OwnedFd, sync::Arc};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 use cni::InterceptRuleCache;
-use proto::{
-    Ack, DiscoveryRequest, InterceptEndpoint, discovery_request::Payload as ReqPayload,
-    discovery_response::Payload as RespPayload,
-    intercept_discovery_client::InterceptDiscoveryClient,
+use ctrl::InterceptRule;
+use futures::StreamExt;
+use k8s_openapi::{
+    api::core::v1::{Pod, Service},
+    apimachinery::pkg::util::intstr::IntOrString,
 };
-use tokio::{
-    fs::File,
-    sync::{RwLock, broadcast, mpsc},
-    time::sleep,
+use kube::{
+    Api, ResourceExt,
+    api::ListParams,
+    runtime::{WatchStreamExt, watcher},
 };
-use tokio_stream::{StreamExt, wrappers::ReceiverStream};
-use tonic::transport;
-use tracing::{Instrument, debug, error, info, instrument, trace_span, warn};
+use tokio::{fs::File, sync::RwLock};
+use tracing::{debug, error, info, instrument};
 
 use crate::{
     config::Config,
     intercept::{setup_inpod_redirection, stop_inpod_redirection},
 };
 
-const MAX_RETRIES: u32 = 5;
-const INITIAL_DELAY_MS: u64 = 500;
 const SELF_NETNS_PATH: &str = "/proc/self/ns/net";
 
 pub struct Discovery {
     config: Config,
+    client: kube::Client,
     intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>,
 }
 
 impl Discovery {
-    pub fn new(config: Config, intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>) -> Self {
+    pub fn new(
+        config: Config,
+        client: kube::Client,
+        intercept_rule_cache: Arc<RwLock<InterceptRuleCache>>,
+    ) -> Self {
         Self {
             config,
+            client,
             intercept_rule_cache,
         }
     }
 
     #[instrument(
-        name = "discovery", skip_all, err,
-        fields(
-            host_ip = %self.config.host_ip,
-            discovery_url = %self.config.discovery_url
-        )
-    )]
-    pub async fn run(self) -> Result<()> {
+            name = "discovery", skip_all, err,
+            fields(host_ip = %self.config.host_ip)
+        )]
+    pub async fn run(&self) -> Result<()> {
+        let intercept_rules = Api::<InterceptRule>::all(self.client.clone());
+        let current_netns = File::open(SELF_NETNS_PATH).await?;
+        let current_netns: Arc<OwnedFd> = Arc::new(current_netns.into_std().await.into());
+
+        let mut stream = watcher::watcher(intercept_rules, Default::default())
+            .default_backoff()
+            .boxed();
+
         loop {
-            let mut client = match self.connect().await {
-                Ok(c) => c,
-                Err(e) => {
-                    error!(error = ?e, "Failed to connect. Retrying in 5s..");
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    continue;
-                }
-            };
+            if let Some(next) = stream.next().await {
+                match next {
+                    Ok(event) => match event {
+                        watcher::Event::Apply(rule) | watcher::Event::InitApply(rule) => {
+                            let namespace = rule.namespace().unwrap_or_default();
+                            let rule_name = rule.name_any();
+                            let service_name = rule.spec.r#match.service;
+                            let service_port = rule.spec.r#match.port;
+                            let rule_id = format!("{}/{}", namespace, rule_name);
 
-            info!("Connection established. Starting stream...");
-
-            let (tx, rx) = mpsc::channel(128);
-
-            let stream = ReceiverStream::new(rx);
-            let request = tonic::Request::new(stream);
-            let mut response = client
-                .intercepts(request)
-                .instrument(trace_span!("intercepts", node_ip = %self.config.host_ip))
-                .await?
-                .into_inner();
-
-            tx.send(DiscoveryRequest {
-                payload: Some(ReqPayload::Hello(proto::PdsHello {
-                    node_ip: self.config.host_ip.to_owned(),
-                    revision: "1".to_owned(),
-                })),
-            })
-            .await?;
-
-            let current_netns = File::open(SELF_NETNS_PATH).await?;
-            let current_netns: Arc<OwnedFd> = Arc::new(current_netns.into_std().await.into());
-
-            let mut snapshot_complete = false;
-            // let mut received_rules = HashMap::new();
-
-            while let Some(resp) = response.next().await {
-                match resp {
-                    Ok(resp) => match resp.payload {
-                        Some(RespPayload::Add(add_msg)) => {
-                            info!("Snapshot Add: {}", add_msg.uid);
-
-                            if let Some(endpoint) = add_msg.endpoint {
-                                self.handle_add(
-                                    &add_msg.uid,
-                                    &endpoint,
-                                    &current_netns,
-                                    self.intercept_rule_cache.clone(),
-                                    &tx,
-                                )
-                                .await?;
-                            }
-                        }
-                        Some(RespPayload::SnapshotSent(_)) => {
-                            info!("Snapshot complete.");
-                            snapshot_complete = true;
-
-                            self.reconcile_local_state(self.intercept_rule_cache.clone())
-                                .await;
-
-                            tx.send(DiscoveryRequest {
-                                payload: Some(ReqPayload::Ack(Ack {
-                                    uid: "".to_string(),
-                                    error: "".to_string(),
-                                })),
-                            })
-                            .await?;
-
-                            break;
-                        }
-                        Some(RespPayload::Remove(remove_msg)) => {
-                            bail!("Received Remove during snapshot: {}", remove_msg.uid);
-                        }
-                        None => {}
-                    },
-                    Err(e) => {
-                        bail!("Error in discovery stream (snapshot): {:?}", e);
-                    }
-                }
-            }
-
-            if !snapshot_complete {
-                bail!("Stream ended before snapshot completed");
-            }
-
-            info!("Entering live update mode...");
-            while let Some(resp) = response.next().await {
-                match resp {
-                    Ok(resp) => match resp.payload {
-                        Some(RespPayload::Add(add_msg)) => {
-                            info!("Live Add/Update: {}", add_msg.uid);
-
-                            if let Some(endpoint) = add_msg.endpoint {
-                                self.handle_add(
-                                    &add_msg.uid,
-                                    &endpoint,
-                                    &current_netns,
-                                    self.intercept_rule_cache.clone(),
-                                    &tx,
-                                )
-                                .await?;
-                            }
-                        }
-                        Some(RespPayload::Remove(remove_msg)) => {
-                            self.handle_remove(
-                                &remove_msg.uid,
-                                &current_netns,
-                                self.intercept_rule_cache.clone(),
-                                &tx,
-                            )
-                            .await?;
-                        }
-                        _ => {
-                            error!(
-                                "Received unexpected message in live update mode. Protocol error."
+                            debug!(
+                                ?namespace,
+                                ?rule_name,
+                                ?service_name,
+                                ?service_port,
+                                "InterceptRule applied"
                             );
-                            return Err(anyhow!(
-                                "Protocol error: Received unexpected message in live mode"
-                            ));
+
+                            let services =
+                                Api::<Service>::namespaced(self.client.clone(), &namespace);
+                            if let Some(service) = services.get_opt(&service_name).await? {
+                                debug!(?namespace, ?rule_name, ?service_name, "Service found");
+
+                                let target_port = match service
+                                    .spec
+                                    .as_ref()
+                                    .and_then(|spec| spec.ports.as_ref())
+                                    .and_then(|ports| {
+                                        ports.iter().find(|&p| p.port == service_port as i32)
+                                    })
+                                    .and_then(|port| port.target_port.clone())
+                                {
+                                    Some(p) => p,
+                                    None => continue,
+                                };
+
+                                debug!(
+                                    ?namespace,
+                                    ?rule_name,
+                                    ?service_name,
+                                    ?service_port,
+                                    ?target_port,
+                                    "TartgetPort found"
+                                );
+
+                                let intercept_endpoints = resolve_intercept_endpoints(
+                                    self.client.clone(),
+                                    &namespace,
+                                    &service,
+                                    &target_port,
+                                    &self.config.host_ip,
+                                )
+                                .await?;
+
+                                debug!(?intercept_endpoints, "Endpoints found");
+
+                                let new_ip_set: HashSet<IpAddr> = intercept_endpoints
+                                    .iter()
+                                    .map(|(ip, _, _)| ip.clone())
+                                    .collect();
+
+                                let mut cache = self.intercept_rule_cache.write().await;
+                                let old_ip_set = cache.get(&rule_id).cloned().unwrap_or_default();
+
+                                debug!(
+                                    ?rule_id,
+                                    old_count = old_ip_set.len(),
+                                    new_count = new_ip_set.len(),
+                                    "Reconciling redirection rules"
+                                );
+
+                                for ip_to_remove in old_ip_set.difference(&new_ip_set) {
+                                    debug!(?ip_to_remove, "Stopping stale redirection");
+                                    if let Err(e) =
+                                        stop_inpod_redirection(*ip_to_remove, current_netns.clone())
+                                            .await
+                                    {
+                                        error!(?e, ?ip_to_remove, "Failed to stop redirection");
+                                    }
+                                }
+
+                                for (ip, _port, _protoo) in intercept_endpoints {
+                                    if !old_ip_set.contains(&ip) {
+                                        info!(?ip, "Setting up new redirection");
+                                        if let Err(e) = setup_inpod_redirection(
+                                            ip,
+                                            &self.config.intercept_gate_addr,
+                                            current_netns.clone(),
+                                            None,
+                                        )
+                                        .await
+                                        {
+                                            error!(?e, ?ip, "Failed to setup redirection");
+                                        }
+                                    } else {
+                                        debug!(?ip, "Redirection already active, skipping");
+                                    }
+                                }
+
+                                cache.insert(rule_id, new_ip_set);
+                            }
                         }
+                        watcher::Event::Delete(rule) => {
+                            let rule_id = format!(
+                                "{}/{}",
+                                rule.namespace().unwrap_or_default(),
+                                rule.name_any()
+                            );
+
+                            let mut cache = self.intercept_rule_cache.write().await;
+                            if let Some(old_ips) = cache.remove(&rule_id) {
+                                info!(
+                                    ?rule_id,
+                                    count = old_ips.len(),
+                                    "Rule deleted, cleaning up all redirections"
+                                );
+                                for ip in old_ips {
+                                    if let Err(e) =
+                                        stop_inpod_redirection(ip, current_netns.clone()).await
+                                    {
+                                        error!(?e, ?ip, "Failed to stop redirection on delete");
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     },
-                    Err(e) => {
-                        error!(error = ?e, "Error in discovery stream (live update)");
-                        return Err(e.into());
-                    }
+                    Err(e) => error!(?e, "Watcher error"),
                 }
             }
         }
     }
+}
 
-    #[instrument(skip_all, err)]
-    async fn connect(&self) -> Result<InterceptDiscoveryClient<tonic::transport::Channel>> {
-        for attempt in 0..MAX_RETRIES {
-            match transport::Endpoint::from_shared(self.config.discovery_url.to_owned())?
-                .connect()
-                .await
-            {
-                Ok(ch) => {
-                    info!("Successfully connected to discovery server");
-                    return Ok(InterceptDiscoveryClient::new(ch));
-                }
-                Err(e) => {
-                    warn!(
-                        error = ?e,
-                        attempt = attempt + 1,
-                        max_retries = MAX_RETRIES,
-                        "Connection failed, will retry..."
-                    );
-
-                    if attempt == MAX_RETRIES - 1 {
-                        break;
-                    }
-
-                    let delay = Duration::from_millis(INITIAL_DELAY_MS * 2_u64.pow(attempt));
-                    warn!(?delay, "Retrying connection");
-                    sleep(delay).await;
-                }
-            }
-        }
-
-        bail!("Failed to connect after all retries.");
-    }
-
-    async fn handle_add(
-        &self,
-        uid: &str,
-        endpoint: &InterceptEndpoint,
-        current_netns: &Arc<OwnedFd>,
-        rule_cache: Arc<RwLock<InterceptRuleCache>>,
-        tx: &mpsc::Sender<DiscoveryRequest>,
-    ) -> Result<()> {
-        info!("Handling ADD for endpoint: {:?}", endpoint);
-
-        let (stop_tx, _) = broadcast::channel::<()>(1);
-
-        let pod_ips: Vec<IpAddr> = endpoint
-            .pod_ids
-            .clone()
-            .into_iter()
-            .map(|id| id.ip)
-            .filter_map(|pod_ip| pod_ip.parse::<IpAddr>().ok())
-            .collect();
-
-        {
-            let mut cache = rule_cache.write().await;
-            match cache.insert(uid.to_string(), (pod_ips.clone(), stop_tx)) {
-                Some((old_pod_ips, _)) => {
-                    debug!(?uid, ?old_pod_ips, ?pod_ips, "Inserted");
-                }
-                None => {
-                    debug!(?uid, ?pod_ips, "Newerly Inserted");
-                }
-            }
-        }
-
-        for pod_ip in pod_ips {
-            if let Err(e) = setup_inpod_redirection(
-                pod_ip,
-                &self.config.intercept_gate_addr,
-                current_netns.clone(),
-                None,
+async fn resolve_intercept_endpoints(
+    client: kube::Client,
+    namespace: &str,
+    svc: &Service,
+    target_port: &IntOrString,
+    host_ip: &str,
+) -> Result<Vec<(IpAddr, i32, String)>> {
+    // Get the service selector from the service spec
+    let selector = svc
+        .spec
+        .as_ref()
+        .and_then(|s| s.selector.as_ref())
+        .ok_or_else(|| {
+            anyhow!(
+                "Service '{}/{}' is missing spec or selector.",
+                namespace,
+                svc.name_any(),
             )
-            .await
-            {
-                error!(?pod_ip, error = ?e, "Failed to setup redirection for pod");
-            }
-        }
+        })?;
 
-        tx.send(DiscoveryRequest {
-            payload: Some(ReqPayload::Ack(Ack {
-                uid: "".to_string(),
-                error: "".to_string(),
-            })),
+    // Create the label selector string from the selector map
+    // e.g., "app=myapp,tier=frontend"
+    let label_selector = selector
+        .iter()
+        .map(|(k, v)| format!("{}={}", k, v))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    // Retrieve the list of Pods matching the label selector
+    let pods = Api::<Pod>::namespaced(client.clone(), &namespace);
+    let list_params = ListParams::default().labels(&label_selector);
+    let target_pods = pods.list(&list_params).await.with_context(|| {
+        format!(
+            "Failed to list pods with selector '{}' for service '{}/{}'",
+            label_selector,
+            namespace,
+            svc.name_any(),
+        )
+    })?;
+
+    let endpoints = target_pods
+        .iter()
+        .filter(|pod| {
+            pod.status
+                .as_ref()
+                .and_then(|s| s.host_ip.as_ref())
+                .map(|i| i == host_ip)
+                .unwrap_or(false)
         })
-        .await?;
+        .filter_map(|pod| {
+            let status = pod.status.as_ref()?;
+            let pod_ip_str = status.pod_ip.as_ref()?;
+            let pod_ip: IpAddr = pod_ip_str.parse().ok()?;
+            let (port_num, protocol) = find_port_info(pod, target_port)?;
 
-        Ok(())
-    }
+            Some((pod_ip, port_num, protocol))
+        })
+        .collect();
 
-    #[instrument(name = "remove", skip_all, err)]
-    async fn handle_remove(
-        &self,
-        uid: &str,
-        current_netns: &Arc<OwnedFd>,
-        rule_cche: Arc<RwLock<InterceptRuleCache>>,
-        tx: &mpsc::Sender<DiscoveryRequest>,
-    ) -> Result<()> {
-        info!("Handling REMOVE for rule_id: {:?}", uid);
+    // if endpoints.is_empty() {}
 
-        let mut cache = rule_cche.write().await;
+    Ok(endpoints)
+}
 
-        if let Some((pod_ips, stop_tx)) = cache.get(uid) {
-            for pod_ip in pod_ips {
-                stop_inpod_redirection(pod_ip.clone(), current_netns.clone()).await?;
-            }
-
-            match cache.remove(uid) {
-                Some((pod_ips, _)) => {
-                    debug!(?uid, ?pod_ips, "Removed from Intercept Rule Cache");
-                }
-                None => {
-                    debug!(?uid, "It doesn't exist");
-                }
-            }
-
-            tx.send(DiscoveryRequest {
-                payload: Some(ReqPayload::Ack(Ack {
-                    uid: "".to_string(),
-                    error: "".to_string(),
-                })),
-            })
-            .await?;
-        }
-
-        Ok(())
-    }
-
-    // Mock-up of reconcile_local_state
-    async fn reconcile_local_state(&self, rule_cache: Arc<RwLock<InterceptRuleCache>>) {
-        info!("Reconciling local state. Active rules: {:?}", rule_cache);
-        // TODO
-    }
+fn find_port_info(pod: &Pod, target_port: &IntOrString) -> Option<(i32, String)> {
+    pod.spec
+        .as_ref()?
+        .containers
+        .iter()
+        .flat_map(|c| c.ports.iter().flatten())
+        .find(|p| match target_port {
+            IntOrString::Int(num) => p.container_port == *num,
+            IntOrString::String(name) => p.name.as_deref() == Some(name),
+        })
+        .map(|p| (p.container_port, p.protocol.clone().unwrap_or_default()))
 }
