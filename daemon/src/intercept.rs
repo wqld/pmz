@@ -19,7 +19,7 @@ use tokio::{
     },
     time::sleep,
 };
-use tracing::{Instrument, debug, error, info, instrument};
+use tracing::{Instrument, debug, error, info, instrument, warn};
 use uuid::Uuid;
 
 use crate::{deploy::Deploy, discovery::Discovery};
@@ -50,39 +50,72 @@ impl Interceptor {
 
     #[instrument(name = "interceptor", skip_all, err)]
     pub async fn launch(mut self) -> Result<()> {
+        let mut uuid: Option<Uuid> = None;
         let agent_ip = self.find_agent_ip().await?;
-        let (sender, conn) = establish_h2_connection(&agent_ip, 8101, false).await?;
-        tokio::spawn(conn);
-        let mut send_req = sender.ready().await?;
 
-        let (send, recv, client_id) = establish_dial_stream(&mut send_req).await?;
-        let (intercept_tx, intercept_rx) = mpsc::channel::<Bytes>(1);
-        let shutdown_receive_task = self.shutdown.resubscribe();
-        let shutdown_process_task = self.shutdown.resubscribe();
+        loop {
+            let (sender, conn) = match establish_h2_connection(&agent_ip, 8101, false).await {
+                Ok(res) => res,
+                Err(e) => {
+                    error!("Failed to connect agent: {e}. Retry in 1s...");
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    continue;
+                }
+            };
 
-        tokio::spawn(
-            async move { register_intercept_rule(self.intercept_ctx_rx, send, client_id).await }
-                .in_current_span(),
-        );
+            let conn_handle = tokio::spawn(conn);
 
-        tokio::spawn(
-            async move { receive_target_port(recv, intercept_tx, shutdown_receive_task).await }
-                .in_current_span(),
-        );
+            let mut send_req = sender.ready().await?;
+            match establish_dial_stream(&mut send_req, uuid).await {
+                Ok((send, recv, client_id)) => {
+                    info!("Connected to Agent. Session UUID: {client_id}");
+                    uuid = Some(client_id);
 
-        tokio::spawn(
-            async move {
-                process_intercept_request(intercept_rx, send_req, client_id, shutdown_process_task)
-                    .await
-            }
-            .in_current_span(),
-        );
+                    let (intercept_tx, intercept_rx) = mpsc::channel::<Bytes>(1);
+                    let intercept_ctx_rx = self.intercept_ctx_rx.clone();
 
-        if let Err(e) = self.shutdown.recv().await {
-            error!(error = ?e, "Interceptor shudown");
+                    let register_handle = tokio::spawn(
+                        async move {
+                            register_intercept_rule(intercept_ctx_rx.clone(), send, client_id).await
+                        }
+                        .in_current_span(),
+                    );
+
+                    let shutdown_receive_task = self.shutdown.resubscribe();
+                    let shutdown_process_task = self.shutdown.resubscribe();
+
+                    let receive_handle = tokio::spawn(
+                        async move {
+                            receive_target_port(recv, intercept_tx, shutdown_receive_task).await
+                        }
+                        .in_current_span(),
+                    );
+
+                    let process_handle = tokio::spawn(
+                        async move {
+                            process_intercept_request(
+                                intercept_rx,
+                                send_req,
+                                client_id,
+                                shutdown_process_task,
+                            )
+                            .await
+                        }
+                        .in_current_span(),
+                    );
+
+                    tokio::select! {
+                        _ = register_handle => warn!("Register task ended"),
+                        _ = receive_handle => warn!("Receive task ended"),
+                        _ = process_handle => warn!("Process task ended"),
+                        _ = conn_handle => warn!("Connection lost"),
+                    }
+                }
+                Err(e) => {
+                    error!("Failed to establish dial stream: {e}");
+                }
+            };
         }
-
-        Ok(())
     }
 
     #[instrument(skip_all)]
@@ -119,20 +152,28 @@ impl Interceptor {
 #[instrument(skip_all)]
 async fn establish_dial_stream(
     send_req: &mut SendRequest<Bytes>,
+    uuid: Option<Uuid>,
 ) -> Result<(SendStream<Bytes>, RecvStream, Uuid)> {
-    let req = Request::builder().uri("/dial").body(()).unwrap();
+    let mut builder = Request::builder().uri("/dial");
+
+    if let Some(id) = uuid {
+        builder = builder.header("x-pmz-daemon-id", id.to_string());
+        debug!("Trying to restore session with UUID: {id}");
+    }
+
+    let req = builder.body(())?;
 
     // send the preface
-    let (resp, mut send) = send_req.send_request(req, false).unwrap();
-    send.send_data(DIAL_PREFACE.into(), false).unwrap();
+    let (resp, mut send) = send_req.send_request(req, false)?;
+    send.send_data(DIAL_PREFACE.into(), false)?;
 
-    let resp = resp.await.unwrap();
+    let resp = resp.await?;
     let mut recv = resp.into_body();
 
     // get an uuid
     let uuid = if let Some(data) = recv.data().await {
-        let data = data.unwrap();
-        Uuid::from_slice(&data).unwrap()
+        let data = data?;
+        Uuid::from_slice(&data)?
     } else {
         bail!("Failed to establish with agent");
     };

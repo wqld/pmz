@@ -73,7 +73,7 @@ pub struct InterceptRuleKey {
     pub port: u16,
 }
 
-#[derive(Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct InterceptRouteKey {
     pub ip: u32,
     pub port: u16,

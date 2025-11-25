@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::Permissions,
     net::IpAddr,
     os::{fd::OwnedFd, unix::fs::PermissionsExt},
@@ -22,7 +23,7 @@ use kube::{Api, Client, ResourceExt, api::ListParams, runtime::reflector::Store}
 use tokio::{
     fs::{File, create_dir_all, remove_file, set_permissions},
     net::UnixListener,
-    sync::{RwLock, broadcast},
+    sync::RwLock,
 };
 use tracing::{Instrument, debug, error, info, instrument};
 
@@ -165,9 +166,7 @@ impl CniServer {
                     let current_netns: Arc<OwnedFd> =
                         Arc::new(current_netns.into_std().await.into());
 
-                    let (stop_tx, _) = broadcast::channel::<()>(1);
-
-                    let pod_ips: Vec<IpAddr> = event
+                    let pod_ips: HashSet<IpAddr> = event
                         .ips
                         .iter()
                         .map(|c| c.address.split('/').next().unwrap_or_default())
@@ -176,20 +175,7 @@ impl CniServer {
 
                     debug!(?rule_id, ?pod_ips, "Try to set in-pod redirection");
 
-                    {
-                        let mut cache = intercept_rule_cache.write().await;
-                        // cache.insert(rule_id, (pod_ips.clone(), stop_tx));
-                        match cache.insert(rule_id.clone(), (pod_ips.clone(), stop_tx)) {
-                            Some((old_pod_ips, _)) => {
-                                debug!(?rule_id, ?old_pod_ips, ?pod_ips, "Inserted");
-                            }
-                            None => {
-                                debug!(?rule_id, ?pod_ips, "Newerly Inserted");
-                            }
-                        }
-                    }
-
-                    for pod_ip in pod_ips {
+                    for pod_ip in pod_ips.clone() {
                         let target_netns_path = format!("/host{}", event.netns);
                         let target_netns = File::open(target_netns_path).await?;
                         let target_netns_fd = target_netns.into_std().await.into();
@@ -202,6 +188,9 @@ impl CniServer {
                         )
                         .await?;
                     }
+
+                    let mut cache = intercept_rule_cache.write().await;
+                    cache.insert(rule_id, pod_ips);
                 }
             }
         }
