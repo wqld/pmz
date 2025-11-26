@@ -25,5 +25,6 @@ COPY --from=builder --chown=root:root /target/pmz-agent /app/
 
 ENV RUST_LOG=info
 EXPOSE 8100
+USER 1000
 
 CMD ["/app/pmz-agent"]

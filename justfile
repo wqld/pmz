@@ -1,3 +1,4 @@
+daemon-tag := '0.1.9'
 agent-tag := '0.1.0'
 cni-tag := '0.1.0'
 target := arch() + '-unknown-linux-musl'
@@ -24,19 +25,28 @@ alias patg := publish-agent-to-ghrc
     cargo build --release --target x86_64-unknown-linux-musl -p agent
     docker build --push --platform linux/amd64,linux/arm64 -t ghcr.io/wqld/pmz-agent:{{TAG}} .
 
-@package-daemon:
-    @# TODO
+alias pctg := publish-cni-to-ghrc
+@publish-cni-to-ghrc TAG=cni-tag:
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+    cargo build --release --target aarch64-unknown-linux-musl -p cni
+    cargo build --release --target x86_64-unknown-linux-musl -p cni
+    docker build --push --platform linux/amd64,linux/arm64 -t ghcr.io/wqld/pmz-cni:{{TAG}} .
+
+@package-daemon TAG=daemon-tag:
+    export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc
+    export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=x86_64-linux-musl-gcc
+    cargo build --release --target aarch64-unknown-linux-musl
+    cargo build --release --target x86_64-unknown-linux-musl
+    tar -zcvf pmz-{{TAG}}-x86_64-musl.tar.gz ./target/x86_64-unknown-linux-musl/release/pmz ./target/x86_64-unknown-linux-musl/release/pmzctl
+    tar -zcvf pmz-{{TAG}}-aarch64-musl.tar.gz ./target/aarch64-unknown-linux-musl/release/pmz ./target/aarch64-unknown-linux-musl/release/pmzctl
 
 @install-crd:
     cargo run -p agent --bin crdgen | kubectl apply -f -
 
-@build-proto:
-    cargo clean -p proto
-    cargo build -p proto
-
 @create-kind:
     kind create cluster --config tests/kind-config.yaml
 
-@setup-env: create-kind build-proto install-crd load-agent-to-kind load-cni-to-kind
+@setup-env: create-kind install-crd load-agent-to-kind load-cni-to-kind
     kubectl apply -f tests/echo.yaml
     k9s
