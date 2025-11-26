@@ -5,9 +5,7 @@ use k8s_openapi::{
     api::{
         apps::v1::{DaemonSet, DaemonSetSpec, Deployment},
         core::v1::{
-            Capabilities, Container, EnvVar, EnvVarSource, HostPathVolumeSource,
-            ObjectFieldSelector, Pod, PodSpec, PodTemplateSpec, Secret, SecurityContext, Service,
-            ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount,
+            AppArmorProfile, Capabilities, Container, EnvVar, EnvVarSource, HostPathVolumeSource, ObjectFieldSelector, Pod, PodSpec, PodTemplateSpec, Secret, SecurityContext, Service, ServiceAccount, ServicePort, ServiceSpec, Toleration, Volume, VolumeMount
         },
         rbac::v1::{ClusterRole, ClusterRoleBinding, PolicyRule, RoleRef, Subject},
     },
@@ -223,11 +221,24 @@ impl<'a> Deploy<'a> {
                                 }
                             ]),
                             security_context: Some(SecurityContext {
-                                privileged: Some(true),
-                                capabilities: Some(Capabilities {
-                                    add: Some(vec!["NET_RAW".to_string(), "NET_ADMIN".to_string()]),
-                                    drop: None,
+                                app_armor_profile: Some(AppArmorProfile {
+                                    localhost_profile: None,
+                                    type_: "Unconfined".into()
                                 }),
+                                capabilities: Some(Capabilities {
+                                    add: Some(vec![
+                                        "NET_RAW".into(),
+                                        "NET_ADMIN".into(),
+                                        "SYS_PTRACE".into(),
+                                        "SYS_ADMIN".into(),
+                                        "DAC_OVERRIDE".into()
+                                    ]),
+                                    drop: Some(vec!["ALL".into()]),
+                                }),
+                                privileged: Some(false),
+                                run_as_group: Some(0),
+                                run_as_non_root: Some(false),
+                                run_as_user: Some(0),
                                 ..Default::default()
                             }),
                             ..Default::default()
@@ -317,7 +328,12 @@ impl<'a> Deploy<'a> {
                                 }
                             ],
                             "securityContext": {
-                                "privileged": true
+                                "allowPrivilegeEscalation": false,
+                                "capabilities": {
+                                    "drop": ["ALL"]
+                                },
+                                "readOnlyRootFilesystem": true,
+                                "runAsNonRoot": true
                             }
                         }],
                         "volumes": [{

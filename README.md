@@ -199,8 +199,8 @@ Download and extract the appropriate release for your local machine:
 ```sh
 # x86_64 or aarch64
 export ARCH=$(uname -m)
-curl -OL https://github.com/wqld/pmz/releases/download/v0.1.8/pmz-0.1.8-${ARCH}-musl.tar.gz
-tar -xf pmz-0.1.8-${ARCH}-musl.tar.gz
+curl -OL https://github.com/wqld/pmz/releases/download/v0.1.9/pmz-0.1.9-${ARCH}-musl.tar.gz
+tar -xf pmz-0.1.9-${ARCH}-musl.tar.gz
 ```
 
 Don't be alarmed if you encounter messages like the following during extraction.
