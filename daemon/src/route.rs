@@ -3,10 +3,10 @@ use std::{error::Error, sync::Arc};
 use anyhow::{Result, bail};
 use aya::maps::{HashMap, MapData};
 use ipnet::IpNet;
-use k8s_openapi::api::core::v1::Service;
+use k8s_openapi::api::{core::v1::Service, networking::v1::ServiceCIDR};
 use kube::{
     Api,
-    api::{DeleteParams, PostParams},
+    api::{DeleteParams, ListParams, PostParams},
     core::ErrorResponse,
 };
 use rsln::{
@@ -77,14 +77,27 @@ impl Router {
 
     async fn find_service_cidr() -> Result<String> {
         let client = kube::Client::try_default().await?;
-        let services: Api<Service> = Api::default_namespaced(client);
+        let service_cidrs: Api<ServiceCIDR> = Api::all(client.clone());
 
+        if let Ok(list) = service_cidrs.list(&ListParams::default()).await {
+            let cidr = list
+                .items
+                .first()
+                .and_then(|sc| sc.spec.as_ref())
+                .and_then(|spec| spec.cidrs.as_ref())
+                .and_then(|cidrs| cidrs.first());
+
+            if let Some(cidr) = cidr {
+                info!("Found Service CIDR via API: {}", cidr);
+                return Ok(cidr.clone());
+            }
+        }
+
+        let services: Api<Service> = Api::default_namespaced(client.clone());
         let dummy: Service = serde_json::from_value(json!({
             "apiVersion": "v1",
             "kind": "Service",
-            "metadata": {
-                "name": "pmz-dummy"
-            },
+            "metadata": { "name": "pmz-dummy" },
             "spec": {
                 "clusterIP": "1.1.1.1",
                 "ports": [{ "port": 443 }]
@@ -93,21 +106,22 @@ impl Router {
 
         match services.create(&PostParams::default(), &dummy).await {
             Ok(_) => {
-                services
-                    .delete("pmz-dummy", &DeleteParams::default())
-                    .await?;
+                let _ = services.delete("pmz-dummy", &DeleteParams::default()).await;
+                bail!("Unexpectedly succeeded to create service with 1.1.1.1");
             }
             Err(err) => {
-                if let Some(e) = err.source().unwrap().downcast_ref::<ErrorResponse>() {
+                if let Some(e) = err.source().and_then(|s| s.downcast_ref::<ErrorResponse>()) {
                     if let Some(cidr) = e.message.split("The range of valid IPs is ").nth(1) {
-                        info!("service cidr: {cidr}");
                         let cidr = cidr.trim().to_owned();
+                        info!("Found Service CIDR via legacy error parsing: {cidr}");
                         return Ok(cidr);
                     }
+
+                    info!("Error message does not contain CIDR hint: {}", e.message);
                 }
             }
         }
 
-        bail!("failed to find service cidr");
+        bail!("failed to find service cidr via both API and legacy methods");
     }
 }
