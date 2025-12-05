@@ -1,7 +1,7 @@
 use std::{
     fs::{self},
     net::Ipv4Addr,
-    os::unix::fs::PermissionsExt,
+    os::{fd::AsRawFd, unix::fs::PermissionsExt},
     path::Path,
     sync::Arc,
     time::Duration,
@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Result, anyhow, bail};
 use aya::maps::{HashMap, MapData};
-use common::{DnsQuery, DnsRecordA};
+use common::{Config, DnsQuery, DnsRecordA};
 use http::{Method, Request, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -42,7 +42,6 @@ use crate::{
     connect::{Connection, ConnectionManager, ConnectionStatus},
     deploy::Deploy,
     discovery::Discovery,
-    forward::Forwarder,
     intercept::Interceptor,
     route::Router,
 };
@@ -51,6 +50,7 @@ pub struct Command {
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
+    config_map: Arc<RwLock<HashMap<MapData, u8, Config>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
     intercept_ctx_tx: Arc<Mutex<mpsc::Sender<InterceptContext>>>,
@@ -62,6 +62,7 @@ impl Command {
         req_rx: Receiver<TunnelRequest>,
         service_registry: HashMap<MapData, DnsQuery, DnsRecordA>,
         service_cidr_map: HashMap<MapData, u8, u32>,
+        config_map: HashMap<MapData, u8, Config>,
         connection_status: Arc<RwLock<ConnectionStatus>>,
     ) -> Self {
         let (intercept_ctx_tx, intercept_ctx_rx) = mpsc::channel::<InterceptContext>(1);
@@ -70,6 +71,7 @@ impl Command {
             req_rx: Arc::new(Mutex::new(req_rx)),
             service_registry: Arc::new(RwLock::new(service_registry)),
             service_cidr_map: Arc::new(RwLock::new(service_cidr_map)),
+            config_map: Arc::new(RwLock::new(config_map)),
             connection_manager: Arc::new(Mutex::new(ConnectionManager::default())),
             connection_status,
             intercept_ctx_tx: Arc::new(Mutex::new(intercept_ctx_tx)),
@@ -79,7 +81,7 @@ impl Command {
 
     #[instrument(name = "command", skip_all)]
     pub async fn run(&self) -> Result<()> {
-        rustls::crypto::aws_lc_rs::default_provider()
+        rustls::crypto::ring::default_provider()
             .install_default()
             .unwrap();
 
@@ -97,6 +99,7 @@ impl Command {
             let req_rx = self.req_rx.clone();
             let service_registry = self.service_registry.clone();
             let service_cidr_map = self.service_cidr_map.clone();
+            let config_map = self.config_map.clone();
             let connection_manager = self.connection_manager.clone();
             let connection_status = self.connection_status.clone();
             let intercept_ctx_tx = self.intercept_ctx_tx.clone();
@@ -113,6 +116,7 @@ impl Command {
                                     req_rx.clone(),
                                     service_registry.clone(),
                                     service_cidr_map.clone(),
+                                    config_map.clone(),
                                     connection_manager.clone(),
                                     connection_status.clone(),
                                     intercept_ctx_tx.clone(),
@@ -146,6 +150,7 @@ async fn handle_request(
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
+    config_map: Arc<RwLock<HashMap<MapData, u8, Config>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
     intercept_ctx_tx: Arc<Mutex<mpsc::Sender<InterceptContext>>>,
@@ -161,6 +166,7 @@ async fn handle_request(
                 req_rx,
                 service_registry,
                 service_cidr_map,
+                config_map,
                 connection_manager,
                 connection_status,
                 intercept_ctx_rx,
@@ -230,17 +236,42 @@ async fn delete_agent() -> Result<Response<Full<Bytes>>> {
     Ok(Response::new(Full::from("Agent deleted")))
 }
 
+fn get_netns_cookie() -> Result<u64> {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0")?;
+    let fd = socket.as_raw_fd();
+
+    let mut cookie: u64 = 0;
+    let mut len = std::mem::size_of::<u64>() as libc::socklen_t;
+
+    let ret = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_NETNS_COOKIE,
+            &mut cookie as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+
+    Ok(cookie)
+}
+
 #[instrument(skip_all)]
 async fn connect(
     req_rx: Arc<Mutex<Receiver<TunnelRequest>>>,
     service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     service_cidr_map: Arc<RwLock<HashMap<MapData, u8, u32>>>,
+    config_map: Arc<RwLock<HashMap<MapData, u8, Config>>>,
     connection_manager: Arc<Mutex<ConnectionManager>>,
     connection_status: Arc<RwLock<ConnectionStatus>>,
     intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
     tunnel_port: u16,
 ) -> Result<Response<Full<Bytes>>> {
-    let agent_port = 8100; // TODO
+    // let agent_port = 8100; // TODO
 
     {
         let conn_mgr = connection_manager.lock().await;
@@ -266,35 +297,30 @@ async fn connect(
     let (shutdown_tx, _) = broadcast::channel::<()>(1);
     let shutdown_intercept = shutdown_tx.subscribe();
 
-    let service_registry_clone = service_registry.clone();
-
     // let conn_stat_route = connection_status.clone();
     let conn_stat_discovery = connection_status.clone();
-    let conn_stat_forwarder = connection_status.clone();
     // let conn_stat_tunnel = connection_status.clone();
 
     let router = Router::setup_routes(service_cidr_map).await?;
     let mut discovery = Discovery::new(service_registry, shutdown_tx.subscribe(), client.clone());
     let mut tunnel = TunnelClient::new(tunnel_port, req_rx, shutdown_tx.subscribe());
-    let mut forwarder = Forwarder::new(
-        agent_port,
-        tunnel_port,
-        shutdown_tx.subscribe(),
-        client.clone(),
-    );
-    let interceptor = Interceptor::new(
-        service_registry_clone,
-        intercept_ctx_rx,
-        shutdown_intercept,
-        client.clone(),
-    );
+
+    let interceptor = Interceptor::new(intercept_ctx_rx, shutdown_intercept, client.clone());
+
+    let cfg = Config {
+        host_netns: get_netns_cookie()?,
+        service_addr: router.service_cidr_addr,
+        subnet_mask: 0xFFFF0000,
+        proxy_pid: std::process::id(),
+        dummy: 0,
+        proxy_port: 18328,
+    };
+
+    let mut config_map = config_map.write().await;
+    config_map.insert(0, cfg, 0)?;
 
     tokio::spawn(async move { discovery.watch(conn_stat_discovery).await }.in_current_span());
-    tokio::spawn(async move { forwarder.start(conn_stat_forwarder).await }.in_current_span());
     tokio::spawn(async move { tunnel.run().await }.in_current_span());
-
-    while let None = connection_status.read().await.forward {}
-
     tokio::spawn(async move { interceptor.launch().await }.in_current_span());
 
     let connection = Connection {
@@ -512,29 +538,6 @@ async fn start_intercept(
     let req: InterceptStartRequest = serde_json::from_reader(body.reader())?;
     debug!("InterceptStartRequest: {req:?}");
 
-    // let namespace = req.namespace;
-    // let service_name = match req.service {
-    //     Some(service) => service,
-    //     None => {
-    //         return Ok(Response::builder()
-    //             .status(StatusCode::BAD_REQUEST)
-    //             .body(Full::from("Please provide the service name."))?);
-    //     }
-    // };
-
-    // let dns_query = Discovery::create_dns_query(service_name, namespace)?;
-
-    // let service_registry = service_registry.read().await;
-    // let cluster_ip =
-    //     match service_registry.get(&dns_query, 0) {
-    //         Ok(record) => record.ip,
-    //         Err(_) => return Ok(Response::builder().status(StatusCode::BAD_REQUEST).body(
-    //             Full::from(
-    //                 "Failed to get the ClusterIp with the specified service name and namespace.",
-    //             ),
-    //         )?),
-    //     };
-
     let (local_port, service_port) = match parse_ports(&req.port) {
         Ok((lo, svc)) => (lo, svc),
         Err(e) => {
@@ -591,34 +594,6 @@ async fn start_intercept(
 
     debug!("send intercept context: {intercept_ctx:?}");
     intercept_ctx_tx.lock().await.send(intercept_ctx).await?;
-
-    // let sender = establish_h2_connection("localhost", tunnel_port, true).await?;
-    // let mut send_req = sender.ready().await?;
-
-    // let body = IntercepRequest {
-    //     cluster_ip,
-    //     service_port,
-    //     target_port: local_port,
-    // };
-
-    // let body = serde_json::to_string(&body)?;
-
-    // let req = http::Request::builder()
-    //     .uri("/intercept")
-    //     .method(http::Method::POST)
-    //     .version(http::Version::HTTP_11)
-    //     .body(())?;
-
-    // let (resp, mut send) = send_req.send_request(req, false)?;
-
-    // debug!("request body: {body:?}");
-
-    // send.send_data(Bytes::from(body), true)?;
-
-    // let resp = resp.await?;
-    // let (parts, mut body) = resp.into_parts();
-    // let body = body.data().await.unwrap()?;
-    // debug!("{:?}: {:?}", parts.status, body);
 
     Ok(Response::builder()
         // .status(parts.status)
@@ -679,10 +654,3 @@ async fn check_connection(
 
     Ok(None)
 }
-
-// #[derive(Serialize)]
-// struct IntercepRequest {
-//     cluster_ip: u32,
-//     service_port: u16,
-//     target_port: u16,
-// }

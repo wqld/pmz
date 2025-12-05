@@ -36,7 +36,10 @@ impl AsyncRead for TunnelStream {
     ) -> Poll<std::io::Result<()>> {
         loop {
             match ready!(self.recv.poll_data(cx)) {
-                Some(Ok(bytes)) if bytes.is_empty() && !self.recv.is_end_stream() => continue,
+                Some(Ok(bytes)) if bytes.is_empty() && !self.recv.is_end_stream() => {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
                 Some(Ok(bytes)) => {
                     let _ = self.recv.flow_control().release_capacity(bytes.len());
                     buf.put_slice(&bytes);
@@ -71,7 +74,9 @@ impl AsyncWrite for TunnelStream {
             return Poll::Ready(Ok(0));
         }
 
-        self.send.reserve_capacity(buf.len());
+        if self.send.capacity() < buf.len() {
+            self.send.reserve_capacity(buf.len());
+        }
 
         let cnt = match ready!(self.send.poll_capacity(cx)) {
             Some(Ok(cnt)) => match self.send_data(&buf[..cnt], false) {

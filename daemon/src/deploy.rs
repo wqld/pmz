@@ -189,11 +189,11 @@ impl<'a> Deploy<'a> {
                                         ..Default::default()
                                     })
                                 },
-                                EnvVar {
-                                    name: "RUST_LOG".to_string(),
-                                    value: Some("debug".to_string()),
-                                    ..Default::default()
-                                }
+                                // EnvVar {
+                                //     name: "RUST_LOG".to_string(),
+                                //     value: Some("debug".to_string()),
+                                //     ..Default::default()
+                                // }
                             ]),
                             volume_mounts: Some(vec![
                                 VolumeMount {
@@ -304,15 +304,10 @@ impl<'a> Deploy<'a> {
                     },
                     "spec": {
                         "serviceAccountName": "pmz-agent",
-                        "hostNetwork": true,
                         "containers": [{
                             "name": AGENT_APP_NAME,
                             "image": "ghcr.io/wqld/pmz-agent:0.1.0",
                             "ports": [{ "containerPort": 8100 }],
-                            "env": [{
-                                "name": "RUST_LOG",
-                                "value": "debug"
-                            }],
                             "volumeMounts": [
                                 {
                                     "name": TLS_SECRET_NAME,

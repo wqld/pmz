@@ -30,7 +30,6 @@ impl ConnectionManager {
 pub struct ConnectionStatus {
     pub proxy: Option<ConnectionCondition>,
     pub discovery: Option<ConnectionCondition>,
-    pub forward: Option<ConnectionCondition>,
 }
 
 impl ConnectionStatus {
@@ -51,16 +50,6 @@ impl ConnectionStatus {
     pub async fn clear_discovery(conn_stat: &Arc<RwLock<Self>>) {
         let mut guard = conn_stat.write().await;
         guard.discovery = None;
-    }
-
-    pub async fn forward(conn_stat: &Arc<RwLock<Self>>, status: bool, reason: &str) {
-        let mut guard = conn_stat.write().await;
-        guard.forward = Some(ConnectionCondition::new(status, reason));
-    }
-
-    pub async fn clear_forward(conn_stat: &Arc<RwLock<Self>>) {
-        let mut guard = conn_stat.write().await;
-        guard.forward = None;
     }
 }
 

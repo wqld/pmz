@@ -15,7 +15,6 @@ path = "src/ctrl/lib.rs"
 proxy = { package = "proxy", path = "../proxy"}
 
 anyhow = { workspace = true, default-features = true }
-libc = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
 tracing-subscriber = { workspace = true, features = ["ansi", "fmt", "smallvec", "std", "tracing-log", "env-filter"] }
@@ -24,23 +23,18 @@ clap = { workspace = true, features = ["derive"] }
 
 kube = { version = "2.0", features = ["runtime", "client", "derive"] }
 k8s-openapi = { version = "0.26", features = ["latest"] }
-schemars = { version = "1.0.4", features = ["chrono04"] }
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
+schemars = { version = "1.1", features = ["chrono04"] }
 futures-util = { version = "0.3", default-features = false }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 http-body-util = "0.1"
 bytes = "1"
-http = "1"
-rustls-pemfile = "2.2.0"
-rustls = "0.23.20"
-tokio-rustls = "0.26"
+http = "1.4"
+rustls = "0.23"
 tokio-stream = "0.1"
 tracing-appender = "0.2"
-hyper-rustls = "0.27.4"
-h2 = "0.4.7"
+h2 = "0.4"
 udp-stream = "0.0.12"
-uuid = { version = "1.16.0", features = ["v7"] }
+uuid = { version = "1.18", features = ["v7"] }
 thiserror = "2.0.12"
 futures = "0.3.31"

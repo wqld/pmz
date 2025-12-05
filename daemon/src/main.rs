@@ -1,13 +1,16 @@
-use std::sync::Arc;
+use std::{fs::File, sync::Arc};
 
 use ::proxy::tunnel::client::TunnelRequest;
 use aya::{
-    maps::HashMap,
-    programs::{SchedClassifier, TcAttachType, tc},
+    maps::{HashMap, SockHash},
+    programs::{
+        CgroupAttachMode, CgroupSockAddr, CgroupSockopt, SchedClassifier, SkMsg, SockOps,
+        TcAttachType, tc,
+    },
 };
 use clap::Parser;
 use command::Command;
-use common::{DnsQuery, DnsRecordA, SockAddr, SockPair};
+use common::{Config, DnsQuery, DnsRecordA, SockAddr, SockKey, SockPair};
 use connect::ConnectionStatus;
 use proxy::Proxy;
 use sudo::PrivilegeLevel;
@@ -22,7 +25,6 @@ mod command;
 mod connect;
 mod deploy;
 mod discovery;
-mod forward;
 mod intercept;
 mod proxy;
 mod route;
@@ -43,6 +45,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     PrivilegeLevel::escalate_if_needed()?;
+
+    // console_subscriber::init();
 
     let opt = Opt::parse();
 
@@ -89,7 +93,30 @@ async fn main() -> anyhow::Result<()> {
     egress_forwarder.load()?;
     egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
-    let (req_tx, req_rx) = mpsc::channel::<TunnelRequest>(1);
+    let file = File::open("/sys/fs/cgroup")?;
+    let tcp_connect: &mut CgroupSockAddr = ebpf.program_mut("tcp_connect").unwrap().try_into()?;
+    tcp_connect.load()?;
+    tcp_connect.attach(file.try_clone()?, CgroupAttachMode::Single)?;
+
+    let sock_ops: &mut SockOps = ebpf.program_mut("tcp_sockops").unwrap().try_into()?;
+    sock_ops.load()?;
+    sock_ops.attach(file.try_clone()?, CgroupAttachMode::Single)?;
+
+    let sockopt: &mut CgroupSockopt = ebpf.program_mut("cg_sockopt").unwrap().try_into()?;
+    sockopt.load()?;
+    sockopt.attach(file, CgroupAttachMode::Single)?;
+
+    let proxy_sock_map: SockHash<_, SockKey> =
+        SockHash::try_from(ebpf.take_map("PROXY_SOCK_MAP").unwrap())?;
+
+    let sk_msg_prog: &mut SkMsg = ebpf.program_mut("tcp_accelerate").unwrap().try_into()?;
+    sk_msg_prog.load()?;
+    sk_msg_prog.attach(&proxy_sock_map.fd())?;
+
+    let (req_tx, req_rx) = mpsc::channel::<TunnelRequest>(1024);
+
+    let config_map: HashMap<_, u8, Config> =
+        HashMap::try_from(ebpf.take_map("CONFIG_MAP").unwrap())?;
 
     let nat_table: HashMap<_, SockPair, SockAddr> =
         HashMap::try_from(ebpf.take_map("NAT_TABLE").unwrap())?;
@@ -104,10 +131,12 @@ async fn main() -> anyhow::Result<()> {
     let connection_status_clone = connection_status.clone();
 
     let proxy = Proxy::new(nat_table, req_tx, connection_status);
+    let proxy = Arc::new(proxy);
     let command = Command::new(
         req_rx,
         service_registry,
         service_cidr_map,
+        config_map,
         connection_status_clone,
     );
 

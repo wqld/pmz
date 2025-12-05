@@ -23,6 +23,7 @@ use tracing::{debug, error, info};
 pub struct Router {
     netlink: Netlink,
     service_route: Routing,
+    pub service_cidr_addr: u32,
 }
 
 impl Drop for Router {
@@ -55,17 +56,18 @@ impl Router {
             }
         }
 
-        let service_cidr_u32: u32 = match service_cidr_net.addr() {
+        let service_cidr_addr: u32 = match service_cidr_net.addr() {
             std::net::IpAddr::V4(ipv4_addr) => ipv4_addr.into(),
             std::net::IpAddr::V6(_) => bail!("IPv6 is not supported"),
         };
 
         let mut cidr_map = service_cidr_map.write().await;
-        cidr_map.insert(0, service_cidr_u32, 0)?;
+        cidr_map.insert(0, service_cidr_addr, 0)?;
 
         Ok(Self {
             netlink,
             service_route,
+            service_cidr_addr,
         })
     }
 
