@@ -12,14 +12,12 @@ ctrl = { package = "agent", path = "../agent" }
 
 anyhow = { workspace = true, default-features = true }
 clap = { workspace = true, features = ["derive"] }
-libc = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "io-std", "fs"] }
 tracing = { workspace = true, features = ["attributes", "std"] }
 tracing-subscriber = { workspace = true, features = ["ansi", "fmt", "smallvec", "std", "tracing-log", "env-filter"] }
 
-chrono = "0.4"
 futures-util = { version = "0.3", default-features = false }
-http = "1.2"
+http = "1.4"
 httparse = "1.10"
 http-body-util = "0.1.2"
 hyper = { version = "1.5.2", features = ["full"] }
@@ -29,7 +27,7 @@ k8s-openapi = { version = "0.26", features = ["latest"] }
 nix = { version = "0.30", features = ["sched", "socket"] }
 procfs = "0.17"
 rsln = "0.0.7"
-rustls = "0.23.20"
+rustls = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tokio-stream = "0.1"

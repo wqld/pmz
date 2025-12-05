@@ -6,9 +6,7 @@ use rustls::{
         danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier},
         verify_server_name,
     },
-    crypto::{
-        WebPkiSupportedAlgorithms, aws_lc_rs, verify_tls12_signature, verify_tls13_signature,
-    },
+    crypto::{WebPkiSupportedAlgorithms, ring, verify_tls12_signature, verify_tls13_signature},
     pki_types::{CertificateDer, ServerName, pem::PemObject},
     server::ParsedCertificate,
 };
@@ -22,7 +20,7 @@ pub struct PmzCertVerifier {
 impl PmzCertVerifier {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            supported: aws_lc_rs::default_provider().signature_verification_algorithms,
+            supported: ring::default_provider().signature_verification_algorithms,
         })
     }
 }

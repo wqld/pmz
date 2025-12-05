@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
         .with(fmt::layer().with_writer(non_blocking))
         .init();
 
-    rustls::crypto::aws_lc_rs::default_provider()
+    rustls::crypto::ring::default_provider()
         .install_default()
         .unwrap();
 
@@ -74,13 +74,10 @@ async fn main() -> Result<()> {
 
     let intercept_rule_map = InterceptRuleMap::default();
     let intercept_rule_map = Arc::new(RwLock::new(intercept_rule_map));
-    // let intercept_rule_map_for_svc = intercept_rule_map.clone();
     let intercept_rule_map_for_eps = intercept_rule_map.clone();
-    // let intercept_rule_map_for_ctrl = intercept_rule_map.clone();
 
     let intercept_route_map = InterceptRouteMap::default();
     let intercept_route_map = Arc::new(RwLock::new(intercept_route_map));
-    // let intercept_route_map_for_svc = intercept_route_map.clone();
     let intercept_route_map_for_eps = intercept_route_map.clone();
     let intercept_route_map_for_gate = intercept_route_map.clone();
 
@@ -129,24 +126,6 @@ async fn main() -> Result<()> {
             }
         }
     }
-
-    // let client = kube::Client::try_default().await?;
-    // let ssapply = PatchParams::apply("pmz-agent").force();
-    // let crds: Api<CustomResourceDefinition> = Api::all(client.clone());
-    // crds.patch(
-    //     "interceptrules.pmz.sinabro.io",
-    //     &ssapply,
-    //     &Patch::Apply(InterceptRule::crd()),
-    // )
-    // .await?;
-
-    // debug!("Waiting for the api-server to accept the CRD");
-    // let establish = await_condition(
-    //     crds,
-    //     "interceptrules.pmz.sinabro.io",
-    //     conditions::is_crd_established(),
-    // );
-    // let _ = tokio::time::timeout(std::time::Duration::from_secs(10), establish).await?;
 
     // controller thread
     // tokio::spawn(async move {
@@ -460,9 +439,12 @@ async fn main() -> Result<()> {
         key: args.key,
     });
 
-    match tokio::join!(intercept.start(), tunnel.start()) {
+    let intercept_handle = tokio::spawn(async move { intercept.start().await });
+    let tunnel_handle = tokio::spawn(async move { tunnel.start().await });
+
+    match tokio::join!(intercept_handle, tunnel_handle) {
         (Ok(_), Ok(_)) => Ok(()),
-        (Ok(_), Err(e)) | (Err(e), Ok(_)) => Err(e),
+        (Ok(_), Err(e)) | (Err(e), Ok(_)) => Err(e.into()),
         (Err(e1), Err(e2)) => bail!("{:?} + {:?}", e1, e2),
     }
 }

@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
         .with(fmt::layer().with_writer(non_blocking))
         .init();
 
-    rustls::crypto::aws_lc_rs::default_provider()
+    rustls::crypto::ring::default_provider()
         .install_default()
         .unwrap();
 

@@ -1,33 +1,31 @@
-use std::{net::Ipv4Addr, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Result, bail};
-use aya::maps::{HashMap, MapData};
-use common::{DnsQuery, DnsRecordA};
 use h2::{RecvStream, SendStream, client::SendRequest};
 use http::Request;
 use hyper::body::Bytes;
+use k8s_openapi::api::core::v1::Pod;
 use proxy::{
     InterceptContext, InterceptRequest,
-    tunnel::{client::establish_h2_connection, stream::TunnelStream},
+    tunnel::{
+        client::{TunnelClient, establish_h2_with_forward},
+        stream::TunnelStream,
+    },
 };
 use tokio::{
     net::TcpStream,
     sync::{
-        Mutex, RwLock,
+        Mutex,
         broadcast::{self},
         mpsc,
     },
-    time::sleep,
 };
 use tracing::{Instrument, debug, error, info, instrument, warn};
 use uuid::Uuid;
 
-use crate::{deploy::Deploy, discovery::Discovery};
-
 const DIAL_PREFACE: &[u8] = b"dial-preface-from-agent";
 
 pub struct Interceptor {
-    service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
     intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
     shutdown: broadcast::Receiver<()>,
     client: kube::Client,
@@ -35,13 +33,11 @@ pub struct Interceptor {
 
 impl Interceptor {
     pub fn new(
-        service_registry: Arc<RwLock<HashMap<MapData, DnsQuery, DnsRecordA>>>,
         intercept_ctx_rx: Arc<Mutex<mpsc::Receiver<InterceptContext>>>,
         shutdown: broadcast::Receiver<()>,
         client: kube::Client,
     ) -> Self {
         Self {
-            service_registry,
             intercept_ctx_rx,
             shutdown,
             client,
@@ -49,21 +45,28 @@ impl Interceptor {
     }
 
     #[instrument(name = "interceptor", skip_all, err)]
-    pub async fn launch(mut self) -> Result<()> {
+    pub async fn launch(self) -> Result<()> {
         let mut uuid: Option<Uuid> = None;
-        let agent_ip = self.find_agent_ip().await?;
+        // let agent_ip = self.find_agent_ip().await?;
 
         loop {
-            let (sender, conn) = match establish_h2_connection(&agent_ip, 8101, false).await {
-                Ok(res) => res,
-                Err(e) => {
-                    error!("Failed to connect agent: {e}. Retry in 1s...");
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    continue;
-                }
-            };
+            let (agent_name, agent_namespace) =
+                TunnelClient::get_pod_info_by_label(self.client.clone(), "app=pmz-agent").await?;
+            let agent_port = 8101;
+            let pods: kube::Api<Pod> = kube::Api::namespaced(self.client.clone(), &agent_namespace);
+
+            let (sender, conn, _) =
+                match establish_h2_with_forward(&pods, &agent_name, agent_port).await {
+                    Ok(res) => res,
+                    Err(e) => {
+                        error!("Failed to connect agent: {e}. Retry in 1s...");
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                        continue;
+                    }
+                };
 
             let conn_handle = tokio::spawn(conn);
+            info!("connected to agent");
 
             let mut send_req = sender.ready().await?;
             match establish_dial_stream(&mut send_req, uuid).await {
@@ -115,36 +118,6 @@ impl Interceptor {
                     error!("Failed to establish dial stream: {e}");
                 }
             };
-        }
-    }
-
-    #[instrument(skip_all)]
-    async fn find_agent_ip(&mut self) -> Result<String> {
-        const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
-        const MAX_BACKOFF: Duration = Duration::from_secs(5);
-        let mut current_delay = INITIAL_BACKOFF;
-
-        let (_, ns) = Deploy::get_pod_info_by_label(self.client.clone(), "app=pmz-agent").await?;
-        let dns_query = Discovery::create_dns_query("pmz-agent", &ns);
-
-        loop {
-            let service_registry = self.service_registry.read().await;
-            if let Ok(ip) = service_registry.get(&dns_query, 0) {
-                let agent_ip = Ipv4Addr::from(ip.ip).to_string();
-                debug!("Found IP for pmz-agent: {}", agent_ip);
-                return Ok(agent_ip);
-            } else {
-                drop(service_registry);
-                error!(
-                    "service 'pmz-agent' not yet available in registry. Retrying in {:?}...",
-                    current_delay
-                );
-
-                tokio::select! {
-                    _ = sleep(current_delay) => current_delay = (current_delay * 2).min(MAX_BACKOFF),
-                    _ = self.shutdown.recv() => bail!("Shutdown received while waiting to retry connection."),
-                }
-            }
         }
     }
 }

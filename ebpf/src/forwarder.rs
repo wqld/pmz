@@ -1,7 +1,4 @@
-use core::{
-    mem,
-    ops::{Deref, DerefMut},
-};
+use core::ops::{Deref, DerefMut};
 
 use aya_ebpf::{
     bindings::{BPF_F_PSEUDO_HDR, TC_ACT_PIPE},
@@ -45,7 +42,7 @@ impl<'a> TrafficForwarder<'a> {
         let subnet_mask: u32 = 4294901760; // u32::MAX << (32 - 16)
         let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
         let (kind, proxy_port) = match self.proto {
-            Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
+            // Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
             Some(Protocol::UDP) => (Protocol::UDP, 38727 /* 18327 */),
             _ => return Ok(TC_ACT_PIPE),
         };
@@ -89,7 +86,7 @@ impl<'a> TrafficForwarder<'a> {
         unsafe {
             let proxy_addr: u32 = 16777343; // 2130706433 (127.0.0.1)
             let (proto, proxy_port) = match self.proto {
-                Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
+                // Some(Protocol::TCP) => (Protocol::TCP, 38983 /* 18328 */),
                 Some(Protocol::UDP) => (Protocol::UDP, 38727 /* 18327 */),
                 _ => return Ok(TC_ACT_PIPE),
             };
@@ -260,40 +257,49 @@ impl<'a> TrafficForwarder<'a> {
         port_offset: usize,
         l4_csum_offset: usize,
     ) -> Result<(), &'static str> {
-        let sum = unsafe {
+        let addr_diff = unsafe {
             bpf_csum_diff(
                 &old_addr as *const _ as *mut _,
                 4,
                 &new_addr as *const _ as *mut _,
                 4,
-                0,
+                0, // seed
             )
-        } as u64;
+        } as i64;
+
+        let port_diff = unsafe {
+            bpf_csum_diff(
+                &old_port as *const _ as *mut _,
+                2,
+                &new_port as *const _ as *mut _,
+                2,
+                0, // seed
+            )
+        } as i64;
+
+        let l4_total_diff = addr_diff + port_diff;
 
         self.store(EthHdr::LEN + addr_offset, &new_addr, 0)
             .map_err(|_| "Failed to store the updated address")?;
 
-        self.l4_csum_replace(
-            EthHdr::LEN + Ipv4Hdr::LEN + l4_csum_offset,
-            old_port as u64,
-            new_port as u64,
-            mem::size_of_val(&new_port) as u64,
-        )
-        .map_err(|_| "Failed to update the L4 checksum for port replacement")?;
-
         self.store(EthHdr::LEN + Ipv4Hdr::LEN + port_offset, &new_port, 0)
             .map_err(|_| "Failed to store the updated port value")?;
+
+        self.l3_csum_replace(
+            EthHdr::LEN + offset_of!(Ipv4Hdr, check),
+            0,
+            addr_diff as u64,
+            0,
+        )
+        .map_err(|_| "Failed to update L3 checksum")?;
 
         self.l4_csum_replace(
             EthHdr::LEN + Ipv4Hdr::LEN + l4_csum_offset,
             0,
-            sum,
+            l4_total_diff as u64,
             BPF_F_PSEUDO_HDR as u64,
         )
-        .map_err(|_| "Failed to finalize the L4 checksum adjustment (pseudo header update)")?;
-
-        self.l3_csum_replace(EthHdr::LEN + offset_of!(Ipv4Hdr, check), 0, sum, 0)
-            .map_err(|_| "Failed to update the L3 checksum for IP header")?;
+        .map_err(|_| "Failed to update L4 checksum")?;
 
         Ok(())
     }

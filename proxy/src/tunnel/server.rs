@@ -1,4 +1,4 @@
-use std::{fs, io, net::SocketAddr, sync::Arc};
+use std::{io, net::SocketAddr, time::Duration};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
@@ -6,12 +6,8 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{body::Incoming, server::conn::http2, service::service_fn, upgrade::Upgraded};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rustls::{
-    ServerConfig,
-    pki_types::{CertificateDer, PrivateKeyDer},
-};
+use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_rustls::TlsAcceptor;
 use tracing::{debug, error, info};
 use udp_stream::UdpStream;
 
@@ -40,25 +36,63 @@ impl TunnelServer {
         ));
 
         let proxy_listener = TcpListener::bind(addr).await?;
-        let proxy_tls_acceptor = create_tls_acceptor(&self.args.cert, &self.args.key)?;
-        info!("Listening on {} w/ tls", addr);
+        // let proxy_tls_acceptor = create_tls_acceptor(&self.args.cert, &self.args.key)?;
+        info!("Listening on {} w/ h2", addr);
 
         loop {
             let (tcp_stream, peer_addr) = proxy_listener.accept().await?;
-            let tls_acceptor = proxy_tls_acceptor.clone();
+
+            // let tls_acceptor = proxy_tls_acceptor.clone();
             debug!("peer addr: {peer_addr:?}");
 
             tokio::task::spawn(async move {
-                let tls_stream = match tls_acceptor.accept(tcp_stream).await {
-                    Ok(tls_stream) => tls_stream,
-                    Err(e) => {
-                        error!("failed to perform tls handshake: {:?}", e);
-                        return;
-                    }
-                };
+                let no_delay = true;
+                let keepalive_time = Duration::from_secs(45);
+                let keepalive_interval = Duration::from_secs(10);
+                let keepalive_retries = 5;
+                // let ut = keepalive_time + keepalive_retries * keepalive_interval;
+
+                tcp_stream.set_nodelay(no_delay).unwrap();
+
+                let ka = TcpKeepalive::new()
+                    .with_time(keepalive_time)
+                    .with_interval(keepalive_interval)
+                    .with_retries(keepalive_retries);
+
+                let sock_ref = socket2::SockRef::from(&tcp_stream);
+                sock_ref.set_tcp_keepalive(&ka).unwrap();
+                // sock_ref.set_tcp_user_timeout(Some(ut))?;
+
+                // let tls_stream = match tls_acceptor.accept(tcp_stream).await {
+                //     Ok(tls_stream) => tls_stream,
+                //     Err(e) => {
+                //         error!("failed to perform tls handshake: {:?}", e);
+                //         return;
+                //     }
+                // };
+
+                // let mut builder = h2::server::Builder::new();
+                // let mut conn: Connection<TlsStream<TcpStream>, Bytes> = builder
+                //     .initial_window_size(4 * 1024 * 1024)
+                //     .initial_connection_window_size(16 * 1024 * 1024)
+                //     .max_frame_size(1024 * 1024)
+                //     .max_header_list_size(65536)
+                //     .max_send_buffer_size(1024 * 400)
+                //     .max_concurrent_streams(200)
+                //     .handshake(tls_stream)
+                //     .await
+                //     .unwrap();
+
+                // let ping_pong = conn.ping_pong().unwrap();
 
                 if let Err(e) = http2::Builder::new(TokioExecutor::new())
-                    .serve_connection(TokioIo::new(tls_stream), service_fn(move |req| proxy(req)))
+                    .initial_stream_window_size(4 * 1024 * 1024)
+                    .initial_connection_window_size(16 * 1024 * 1024)
+                    .max_frame_size(1024 * 1024)
+                    .max_header_list_size(65536)
+                    .max_send_buf_size(1024 * 400)
+                    .max_concurrent_streams(200)
+                    .serve_connection(TokioIo::new(tcp_stream), service_fn(move |req| proxy(req)))
                     .await
                 {
                     error!("failed to serve connection: {:?}", e);
@@ -66,18 +100,6 @@ impl TunnelServer {
             });
         }
     }
-}
-
-fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
-    let cert = load_cert(cert_path).expect("failed to load crt file");
-    let key = load_key(key_path).expect("failed to load key file");
-
-    let mut server_config = ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(cert, key)
-        .map_err(|e| error(e.to_string()))?;
-    server_config.alpn_protocols = vec![b"h2".to_vec()];
-    Ok(TlsAcceptor::from(Arc::new(server_config)))
 }
 
 async fn proxy(req: Request<Incoming>) -> Result<Response<BoxBody<Bytes, hyper::Error>>> {
@@ -142,8 +164,9 @@ async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()
 
     let (from_client, from_server) = match proto {
         PROTO::TCP => {
-            tokio::io::copy_bidirectional(&mut upgraded, &mut TcpStream::connect(addr).await?)
-                .await?
+            let mut upstream = TcpStream::connect(addr).await?;
+            upstream.set_nodelay(true)?;
+            tokio::io::copy_bidirectional(&mut upgraded, &mut upstream).await?
         }
         PROTO::UDP => {
             tokio::io::copy_bidirectional(
@@ -193,18 +216,30 @@ fn full<T: Into<Bytes>>(chunk: T) -> BoxBody<Bytes, hyper::Error> {
         .boxed()
 }
 
-fn load_cert(filename: &str) -> io::Result<Vec<CertificateDer<'static>>> {
-    let certfile = fs::File::open(filename)?;
-    let mut reader = io::BufReader::new(certfile);
-    rustls_pemfile::certs(&mut reader).collect()
-}
+// fn create_tls_acceptor(cert_path: &str, key_path: &str) -> Result<TlsAcceptor> {
+//     let cert = load_cert(cert_path).expect("failed to load crt file");
+//     let key = load_key(key_path).expect("failed to load key file");
 
-fn load_key(filename: &str) -> io::Result<PrivateKeyDer<'static>> {
-    let keyfile = fs::File::open(filename)?;
-    let mut reader = io::BufReader::new(keyfile);
-    rustls_pemfile::private_key(&mut reader).map(|key| key.unwrap())
-}
+//     let mut server_config = ServerConfig::builder()
+//         .with_no_client_auth()
+//         .with_single_cert(cert, key)
+//         .map_err(|e| error(e.to_string()))?;
+//     server_config.alpn_protocols = vec![b"h2".to_vec()];
+//     Ok(TlsAcceptor::from(Arc::new(server_config)))
+// }
 
-fn error(err: String) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, err)
-}
+// fn load_cert(filename: &str) -> io::Result<Vec<CertificateDer<'static>>> {
+//     let certfile = fs::File::open(filename)?;
+//     let mut reader = io::BufReader::new(certfile);
+//     rustls_pemfile::certs(&mut reader).collect()
+// }
+
+// fn load_key(filename: &str) -> io::Result<PrivateKeyDer<'static>> {
+//     let keyfile = fs::File::open(filename)?;
+//     let mut reader = io::BufReader::new(keyfile);
+//     rustls_pemfile::private_key(&mut reader).map(|key| key.unwrap())
+// }
+
+// fn error(err: String) -> io::Error {
+//     io::Error::new(io::ErrorKind::Other, err)
+// }
