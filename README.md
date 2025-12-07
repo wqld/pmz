@@ -5,20 +5,21 @@ such as `name.namespace.svc`, from your local machine.
 
 ## Motivation
 
-While exploring Telepresence, I was impressed by its powerful features, but certain aspects left me wanting more.
+Initially, the primary motivation for developing `pmz` was to create an open alternative to Telepresence's **personal intercept** feature, which was previously exclusive to their paid subscription model.
 
-- Specifically, I found it limiting to only be able to invoke services using their service domain.
-- Additionally, the personal intercept feature, which I found quite valuable, was exclusively available in the paid subscription model.
+Although Telepresence has recently introduced this feature to their OSS version, `pmz` has evolved into a project with its own distinct architectural goals. I decided to continue development to explore specific features and modern networking technologies:
 
-As a result, I was inspired to design and implement a new tool that could offer these capabilities.
+- **Custom Domain Support:** Unlike the restriction to service domains, I wanted the flexibility to invoke services using custom domains.
+- **Istio-Inspired Architecture:** Drawing inspiration from **Istio's ztunnel (Ambient Mesh)**, I implemented **HBONE** (HTTP-Based Overlay Network Environment) and **In-Pod Traffic Redirection** to build a secure and lightweight overlay.
+- **eBPF-Based Performance:** To support this architecture efficiently, I leveraged **eBPF** for high-performance, transparent packet interception.
 
-My initial goal was to achieve performance comparable to Telepresence.
-Below is a simple throughput comparison of these tools under identical load conditions:
+Today, `pmz` serves as both a practical tool and a playground for these high-performance networking concepts.
+
+Below is a simple throughput comparison under identical load conditions:
 
 <img src="docs/images/pmz-telepresence-performance.svg" width="400">
 
-However, it's important to note that `pmz` does not yet match the versatility and stability of Telepresence.
-It is currently limited to Linux operating systems and, as an early-stage project, may encounter various issues.
+> **Note**: `pmz` is currently limited to Linux operating systems and, as an early-stage project, may encounter edge cases not present in mature tools like Telepresence.
 
 ## Features
 
@@ -52,12 +53,8 @@ curl: (6) Could not resolve host: echo.default.svc
 HTTP/1.1 200 OK
 Content-Type: application/json; charset=utf-8
 Content-Length: 9
-ETag: W/"9-9C3TDmXfhoWPizWzjFyCX+fxVeQ"
-Date: Fri, 17 Jan 2025 12:01:07 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
-"amazing"⏎
+...
+amazing"⏎
 ```
 
 ### Custom domain routing
@@ -82,22 +79,9 @@ kubernetes.default.svc 10.96.0.1
 > pmzctl dns add --domain www.dns.com --service echo --namespace default
 200 OK: dns added
 
-> pmzctl dns list
-200 OK:
-www.dns.com 10.96.25.30
-echo.default.svc 10.96.25.30
-kube-dns.kube-system.svc 10.96.0.10
-kubernetes.default.svc 10.96.0.1
-
 > curl "www.dns.com:80/?echo_body=dns"
 HTTP/1.1 200 OK
-Content-Type: application/json; charset=utf-8
-Content-Length: 5
-ETag: W/"5-G/nd3qlVXee5I7QjY2ztXyFnD1E"
-Date: Fri, 17 Jan 2025 12:03:42 GMT
-Connection: keep-alive
-Keep-Alive: timeout=5
-
+...
 "dns"⏎
 
 > pmzctl dns remove --domain www.dns.com
@@ -157,10 +141,7 @@ Listening on port 80.
   "host":{"hostname":"echo.default.svc","ip":"::ffff:172.17.0.1","ips":[]},
   "http":{"method":"GET","baseUrl":"","originalUrl":"/?echo_body=amazing","protocol":"http"},
   "request":{"params":{},"query":{"echo_body":"amazing"},
-  "cookies":{},
-  "body":{},
-  "headers":{"host":"echo.default.svc","user-agent":"curl/8.15.0","accept":"*/*"}},
-  "environment":{"PATH":"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin","HOSTNAME":"f23ba541dc7b","NODE_VERSION":"20.11.0","YARN_VERSION":"1.22.19","HOME":"/root"},
+  ...
   "msg":"Thu, 04 Sep 2025 14:20:11 GMT | [GET] - http://echo.default.svc/?echo_body=amazing","time":"2025-09-04T14:20:11.381Z","v":0
 }
 ```
@@ -175,7 +156,10 @@ Enable personal intercepts based on domain names rather than relying on header-b
 
 ### Supported protocols
 
-Both TCP and UDP are supported.
+~Both TCP and UDP are supported.~
+Currently, pmz primarily supports TCP.
+
+> **Note**: UDP support has been temporarily suspended. We are actively researching optimization techniques to ensure UDP traffic handling meets our high-performance standards before re-enabling it.
 
 ## Architecture
 
@@ -203,30 +187,28 @@ curl -OL https://github.com/wqld/pmz/releases/download/v0.1.9/pmz-0.1.9-${ARCH}-
 tar -xf pmz-0.1.9-${ARCH}-musl.tar.gz
 ```
 
-Don't be alarmed if you encounter messages like the following during extraction.
-This is because the archive was created on macOS.
-A different method will be used for future releases:
-
-- `tar: Ignoring unknown extended header keyword 'LIBARCHIVE.xattr.com.apple.provenance'`
+> **Note**: If you see a warning like `tar: Ignoring unknown extended header keyword...` during extraction, it is due to metadata differences from the macOS build environment and can be safely ignored.
 
 ### Usage
 
-First, let's start the `pmz-daemon`.
-Since `pmz` uses eBPF, you need to specify your local machine's network interface so it knows where to load the eBPF program:
+1. **Start the Daemon**
+Since `pmz` uses eBPF, you need to specify your local network interface (e.g., `eth0`, `wlan0`) so it knows where to load the eBPF program:
 
 ```sh
 > pmzctl run --interface eth0
 Running..
 ```
 
-Next, open a new shell and deploy the `pmz-agent` to your Kubernetes cluster:
+2. **Deploy the Agent**
+Open a new shell and deploy the `pmz-agent` to your Kubernetes cluster:
 
 ```sh
 > pmzctl agent deploy
 200 OK: Agent deployed
 ```
 
-After that, establish a tunnel between your local machine and the cluster:
+3. **Connect**
+Establish a tunnel between your local machine and the cluster:
 
 ```sh
 > pmzctl connect
@@ -239,6 +221,7 @@ echo.default.svc 10.96.25.30
 kubernetes.default.svc 10.96.0.1
 ```
 
+4. **Verify**
 Now, you can freely access workloads in the cluster from your local machine using their domain names!
 
 ```sh

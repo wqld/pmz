@@ -9,28 +9,14 @@ use kube::{
     api::{DeleteParams, ListParams, PostParams},
     core::ErrorResponse,
 };
-use rsln::{
-    netlink::Netlink,
-    types::{
-        link::LinkAttrs,
-        routing::{Routing, RoutingBuilder},
-    },
-};
+use rsln::netlink::Netlink;
 use serde_json::json;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::info;
 
 pub struct Router {
-    netlink: Netlink,
-    service_route: Routing,
+    _netlink: Netlink,
     pub service_cidr_addr: u32,
-}
-
-impl Drop for Router {
-    fn drop(&mut self) {
-        debug!("route dropped");
-        self.drop_routes()
-    }
 }
 
 impl Router {
@@ -39,22 +25,26 @@ impl Router {
     ) -> Result<Self> {
         let service_cidr = Self::find_service_cidr().await?;
         let service_cidr_net = service_cidr.parse::<IpNet>()?;
-        let mut netlink = Netlink::new();
+        let netlink = Netlink::new();
 
-        let link = netlink.link_get(&LinkAttrs::new("lo"))?;
+        // let link = netlink.link_get(&LinkAttrs::new("lo"))?;
 
-        let service_route = RoutingBuilder::default()
-            .oif_index(link.attrs().index)
-            .dst(Some(service_cidr_net))
-            .build()?;
+        // ip route add local service_cidr dev lo table 100
+        // let udp_service_route = RoutingBuilder::default()
+        //     .oif_index(link.attrs().index)
+        //     .dst(Some(service_cidr_net))
+        //     .table(100)
+        //     .rtm_type(libc::RTN_LOCAL)
+        //     .scope(libc::RT_SCOPE_HOST)
+        //     .build()?;
 
-        if let Err(e) = netlink.route_add(&service_route) {
-            if e.to_string().contains("File exists") {
-                debug!("route already exists");
-            } else {
-                return Err(e);
-            }
-        }
+        // if let Err(e) = netlink.route_add(&udp_service_route) {
+        //     if e.to_string().contains("File exists") {
+        //         debug!("route already exists");
+        //     } else {
+        //         return Err(e);
+        //     }
+        // }
 
         let service_cidr_addr: u32 = match service_cidr_net.addr() {
             std::net::IpAddr::V4(ipv4_addr) => ipv4_addr.into(),
@@ -65,16 +55,9 @@ impl Router {
         cidr_map.insert(0, service_cidr_addr, 0)?;
 
         Ok(Self {
-            netlink,
-            service_route,
+            _netlink: netlink,
             service_cidr_addr,
         })
-    }
-
-    fn drop_routes(&mut self) {
-        if let Err(e) = self.netlink.route_del(&self.service_route) {
-            error!("failed to drop routes: {e:#?}");
-        }
     }
 
     async fn find_service_cidr() -> Result<String> {

@@ -69,10 +69,10 @@ async fn main() -> anyhow::Result<()> {
         env!("OUT_DIR"),
         "/pmz"
     )))?;
-    if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
-        // This can happen if you remove all log statements from your eBPF program.
-        warn!(error = ?e, "Failed to initialize eBPF logger");
-    }
+    // if let Err(e) = aya_log::EbpfLogger::init(&mut ebpf) {
+    //     // This can happen if you remove all log statements from your eBPF program.
+    //     warn!(error = ?e, "Failed to initialize eBPF logger");
+    // }
     let Opt { iface } = opt;
     // error adding clsact to the interface if it is already added is harmless
     // the full cleanup can be done with 'sudo tc qdisc del dev eth0 clsact'.
@@ -83,28 +83,28 @@ async fn main() -> anyhow::Result<()> {
     resolver.load()?;
     resolver.attach(&iface, TcAttachType::Egress)?;
 
-    let ingress_forwarder: &mut SchedClassifier =
-        ebpf.program_mut("ingress_forwarder").unwrap().try_into()?;
-    ingress_forwarder.load()?;
-    ingress_forwarder.attach("lo", TcAttachType::Ingress)?;
+    // let ingress_forwarder: &mut SchedClassifier =
+    //     ebpf.program_mut("ingress_forwarder").unwrap().try_into()?;
+    // ingress_forwarder.load()?;
+    // ingress_forwarder.attach("lo", TcAttachType::Ingress)?;
 
-    let egress_forwarder: &mut SchedClassifier =
-        ebpf.program_mut("egress_forwarder").unwrap().try_into()?;
-    egress_forwarder.load()?;
-    egress_forwarder.attach("lo", TcAttachType::Egress)?;
+    // let egress_forwarder: &mut SchedClassifier =
+    //     ebpf.program_mut("egress_forwarder").unwrap().try_into()?;
+    // egress_forwarder.load()?;
+    // egress_forwarder.attach("lo", TcAttachType::Egress)?;
 
-    let file = File::open("/sys/fs/cgroup")?;
+    let cgroup_file = File::open("/sys/fs/cgroup")?;
     let tcp_connect: &mut CgroupSockAddr = ebpf.program_mut("tcp_connect").unwrap().try_into()?;
     tcp_connect.load()?;
-    tcp_connect.attach(file.try_clone()?, CgroupAttachMode::Single)?;
+    tcp_connect.attach(cgroup_file.try_clone()?, CgroupAttachMode::Single)?;
 
     let sock_ops: &mut SockOps = ebpf.program_mut("tcp_sockops").unwrap().try_into()?;
     sock_ops.load()?;
-    sock_ops.attach(file.try_clone()?, CgroupAttachMode::Single)?;
+    sock_ops.attach(cgroup_file.try_clone()?, CgroupAttachMode::Single)?;
 
     let sockopt: &mut CgroupSockopt = ebpf.program_mut("cg_sockopt").unwrap().try_into()?;
     sockopt.load()?;
-    sockopt.attach(file, CgroupAttachMode::Single)?;
+    sockopt.attach(cgroup_file.try_clone()?, CgroupAttachMode::Single)?;
 
     let proxy_sock_map: SockHash<_, SockKey> =
         SockHash::try_from(ebpf.take_map("PROXY_SOCK_MAP").unwrap())?;

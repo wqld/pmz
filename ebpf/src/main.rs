@@ -5,8 +5,6 @@ mod context;
 mod forwarder;
 mod resolver;
 
-use core::mem;
-
 use aya_ebpf::{
     EbpfContext,
     bindings::{
@@ -35,13 +33,13 @@ use crate::forwarder::TrafficForwarder;
 static CONFIG_MAP: HashMap<u8, Config> = HashMap::with_max_entries(1, 0);
 
 #[map]
-static COOKIE_ORIGIN_MAP: HashMap<u64, SockAddr> = HashMap::with_max_entries(20000, 0);
+static COOKIE_ORIGIN_MAP: LruHashMap<u64, SockAddr> = LruHashMap::with_max_entries(131072, 0);
 
 #[map]
-static PORT_COOKIE_MAP: HashMap<u16, u64> = HashMap::with_max_entries(20000, 0);
+static PORT_COOKIE_MAP: HashMap<u16, u64> = HashMap::with_max_entries(65536, 0);
 
 #[map]
-static PROXY_SOCK_MAP: SockHash<SockKey> = SockHash::with_max_entries(65535, 0);
+static PROXY_SOCK_MAP: SockHash<SockKey> = SockHash::with_max_entries(65536, 0);
 
 #[map]
 static SERVICE_CIDR_MAP: HashMap<u8, u32> = HashMap::with_max_entries(1, 0);
@@ -293,7 +291,7 @@ pub fn cg_sockopt(ctx: SockoptContext) -> i32 {
     let optval = unsafe { sockopt.__bindgen_anon_2.optval };
     let optval_end = unsafe { sockopt.__bindgen_anon_3.optval_end };
 
-    let sockaddr_size = mem::size_of::<SockAddrIn>();
+    let sockaddr_size = size_of::<SockAddrIn>();
 
     if optval.is_null() || (optval as usize + sockaddr_size) > (optval_end as usize) {
         return 1;

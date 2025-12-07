@@ -1,0 +1,41 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-udp
+  namespace: default
+  labels:
+    app: echo-udp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: echo-udp
+  template:
+    metadata:
+      labels:
+        app: echo-udp
+    spec:
+      containers:
+      - name: echo-server
+        image: quay.io/cilium/echoserver-udp:v2025.03.24
+        ports:
+        - containerPort: 69
+          protocol: UDP
+        env:
+        - name: "POD_NAME"
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-udp
+  namespace: default
+spec:
+  selector:
+    app: echo-udp
+  ports:
+    - protocol: UDP
+      port: 69
+      targetPort: 69
