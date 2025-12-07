@@ -14,6 +14,7 @@ use k8s_openapi::api::discovery::v1::EndpointSlice;
 use kube::api::{ListParams, Patch, PatchParams};
 use kube::runtime::{WatchStreamExt, watcher};
 use kube::{Api, ResourceExt};
+use proxy::tunnel::TcpListenerTunnelExt;
 use proxy::{
     DialRequest, InterceptRouteKey, InterceptRouteMap, InterceptRuleKey, InterceptRuleMap,
     InterceptValue,
@@ -382,7 +383,7 @@ async fn main() -> Result<()> {
         debug!("Intercep Gate: Listening on {addr}");
 
         loop {
-            let (mut stream, peer_addr) = listener.accept().await.unwrap();
+            let (mut stream, peer_addr) = listener.accept_tun().await.unwrap();
             debug!("peer_addr: {peer_addr:?}");
 
             let mut original_dst_heder = [0u8; 6];

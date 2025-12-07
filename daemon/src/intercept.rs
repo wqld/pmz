@@ -8,6 +8,7 @@ use k8s_openapi::api::core::v1::Pod;
 use proxy::{
     InterceptContext, InterceptRequest,
     tunnel::{
+        TcpStreamTunnelExt,
         client::{TunnelClient, establish_h2_with_forward},
         stream::TunnelStream,
     },
@@ -287,7 +288,7 @@ pub async fn establish_intercept_tunnel(
 
     let mut downstream = TunnelStream { recv, send };
     let target_addr = format!("localhost:{}", target_port);
-    let mut upstream = TcpStream::connect(target_addr).await?;
+    let mut upstream = TcpStream::connect_tun(target_addr).await?;
 
     tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await?;
 

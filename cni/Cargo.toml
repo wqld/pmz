@@ -9,6 +9,7 @@ path = "src/plugin/main.rs"
 
 [dependencies]
 ctrl = { package = "agent", path = "../agent" }
+proxy = { package = "proxy", path = "../proxy"}
 
 anyhow = { workspace = true, default-features = true }
 clap = { workspace = true, features = ["derive"] }

@@ -5,8 +5,10 @@ use h2::{Reason, RecvStream, SendStream};
 use hyper::body::Bytes;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
+    net::TcpStream,
     sync::mpsc::{self, error::TrySendError},
 };
+use udp_stream::UdpStream;
 
 pub struct TunnelStream {
     pub recv: RecvStream,
@@ -193,5 +195,56 @@ impl<T: From<Bytes>> AsyncWrite for ChannelStream<T> {
         _cx: &mut std::task::Context<'_>,
     ) -> Poll<Result<(), std::io::Error>> {
         Poll::Ready(Ok(()))
+    }
+}
+
+pub enum ProxyStream {
+    Tcp(TcpStream),
+    Udp(UdpStream),
+}
+
+impl AsyncRead for ProxyStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.as_mut().get_mut() {
+            ProxyStream::Tcp(stream) => Pin::new(stream).poll_read(cx, buf),
+            ProxyStream::Udp(stream) => Pin::new(stream).poll_read(cx, buf),
+        }
+    }
+}
+
+impl AsyncWrite for ProxyStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        match self.as_mut().get_mut() {
+            ProxyStream::Tcp(stream) => Pin::new(stream).poll_write(cx, buf),
+            ProxyStream::Udp(stream) => Pin::new(stream).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.as_mut().get_mut() {
+            ProxyStream::Tcp(stream) => Pin::new(stream).poll_flush(cx),
+            ProxyStream::Udp(stream) => Pin::new(stream).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        match self.as_mut().get_mut() {
+            ProxyStream::Tcp(stream) => Pin::new(stream).poll_shutdown(cx),
+            ProxyStream::Udp(stream) => Pin::new(stream).poll_shutdown(cx),
+        }
     }
 }

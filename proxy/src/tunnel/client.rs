@@ -11,12 +11,12 @@ use kube::{
 };
 use tokio::{
     fs::File,
-    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::AsyncWriteExt,
     sync::{Mutex, broadcast, mpsc::Receiver, oneshot},
 };
 use tracing::{Instrument, debug, error, info, instrument};
 
-use crate::tunnel::stream::TunnelStream;
+use crate::tunnel::stream::{ProxyStream, TunnelStream};
 
 use super::PMZ_PROTO_HDR;
 
@@ -283,12 +283,8 @@ pub async fn establish_h2_with_forward(
     Ok((sender, Box::pin(conn), ping_pong))
 }
 
-pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
-
-impl<T> Stream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
-
 pub struct TunnelRequest {
     pub protocol: &'static str,
-    pub stream: Box<dyn Stream>,
+    pub stream: ProxyStream,
     pub target: String,
 }

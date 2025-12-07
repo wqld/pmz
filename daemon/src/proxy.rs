@@ -1,13 +1,12 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::os::fd::AsRawFd;
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::{Result, bail};
 use aya::maps::{HashMap, MapData};
 use common::{SockAddr, SockPair};
-use proxy::tunnel::{PROTO_TCP, PROTO_UDP};
-use socket2::TcpKeepalive;
+use proxy::tunnel::stream::ProxyStream;
+use proxy::tunnel::{PROTO_TCP, PROTO_UDP, TcpListenerTunnelExt};
 use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc::Sender;
@@ -88,26 +87,11 @@ impl Proxy {
         ConnectionStatus::proxy(&self.connection_status, true, "Up").await;
 
         loop {
-            let (stream, peer_addr) = listener.accept().await?;
-
+            let (stream, peer_addr) = listener.accept_tun().await?;
             let tx = self.req_tx.clone();
 
             tokio::spawn(
                 async move {
-                    stream.set_nodelay(true).unwrap();
-
-                    let keepalive_time = Duration::from_secs(45);
-                    let keepalive_interval = Duration::from_secs(10);
-                    let keepalive_retries = 5;
-
-                    let ka = TcpKeepalive::new()
-                        .with_time(keepalive_time)
-                        .with_interval(keepalive_interval)
-                        .with_retries(keepalive_retries);
-
-                    let sock_ref = socket2::SockRef::from(&stream);
-                    sock_ref.set_tcp_keepalive(&ka).unwrap();
-
                     let target = match Self::get_original_dst(&stream) {
                         Ok(addr) => format!("{}", addr),
                         Err(e) => {
@@ -121,7 +105,7 @@ impl Proxy {
                     if let Err(e) = tx
                         .send(TunnelRequest {
                             protocol: PROTO_TCP,
-                            stream: Box::new(stream),
+                            stream: ProxyStream::Tcp(stream),
                             target,
                         })
                         .await
@@ -156,7 +140,7 @@ impl Proxy {
                     if let Err(e) = tx
                         .send(TunnelRequest {
                             protocol: PROTO_UDP,
-                            stream: Box::new(stream),
+                            stream: ProxyStream::Udp(stream),
                             target,
                         })
                         .await
