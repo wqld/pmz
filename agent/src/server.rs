@@ -6,7 +6,7 @@ use h2::{RecvStream, SendStream, server::SendResponse};
 use http::Request;
 use proxy::{
     DialRequest, InterceptContext, InterceptRequest, InterceptRuleKey, InterceptValue,
-    tunnel::stream::TunnelStream,
+    tunnel::{TcpListenerTunnelExt, stream::TunnelStream},
 };
 use tokio::{
     net::{TcpListener, TcpStream},
@@ -61,7 +61,7 @@ impl InterceptTunnel {
         info!("Listening on {}", addr);
 
         loop {
-            if let Ok((stream, peer_addr)) = listener.accept().await {
+            if let Ok((stream, peer_addr)) = listener.accept_tun().await {
                 let state = self.state.clone();
 
                 tokio::spawn(
@@ -317,10 +317,6 @@ async fn intercept(
             recv,
             send: send_stream,
         };
-        // let mut upstream = match state.stream_map.lock().await.remove(&intercept_req) {
-        //     Some(stream) => stream,
-        //     None => todo!(),
-        // };
 
         debug!("Starting bidirectional copy");
 

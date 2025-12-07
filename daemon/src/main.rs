@@ -18,7 +18,7 @@ use tokio::{
     signal,
     sync::{RwLock, mpsc},
 };
-use tracing::{debug, warn};
+use tracing::debug;
 use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
 
 mod command;

@@ -1,4 +1,4 @@
-use std::{io, net::SocketAddr, time::Duration};
+use std::{io, net::SocketAddr};
 
 use anyhow::Result;
 use bytes::{Buf, Bytes};
@@ -6,12 +6,11 @@ use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Empty, Full, combinators::BoxBody};
 use hyper::{body::Incoming, server::conn::http2, service::service_fn, upgrade::Upgraded};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use socket2::TcpKeepalive;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{debug, error, info};
 use udp_stream::UdpStream;
 
-use crate::tunnel::{PMZ_PROTO_HDR, PROTO};
+use crate::tunnel::{PMZ_PROTO_HDR, PROTO, TcpListenerTunnelExt, TcpStreamTunnelExt};
 
 pub struct Args {
     pub ip: String,
@@ -40,29 +39,12 @@ impl TunnelServer {
         info!("Listening on {} w/ h2", addr);
 
         loop {
-            let (tcp_stream, peer_addr) = proxy_listener.accept().await?;
+            let (tcp_stream, peer_addr) = proxy_listener.accept_tun().await?;
 
             // let tls_acceptor = proxy_tls_acceptor.clone();
             debug!("peer addr: {peer_addr:?}");
 
             tokio::task::spawn(async move {
-                let no_delay = true;
-                let keepalive_time = Duration::from_secs(45);
-                let keepalive_interval = Duration::from_secs(10);
-                let keepalive_retries = 5;
-                // let ut = keepalive_time + keepalive_retries * keepalive_interval;
-
-                tcp_stream.set_nodelay(no_delay).unwrap();
-
-                let ka = TcpKeepalive::new()
-                    .with_time(keepalive_time)
-                    .with_interval(keepalive_interval)
-                    .with_retries(keepalive_retries);
-
-                let sock_ref = socket2::SockRef::from(&tcp_stream);
-                sock_ref.set_tcp_keepalive(&ka).unwrap();
-                // sock_ref.set_tcp_user_timeout(Some(ut))?;
-
                 // let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                 //     Ok(tls_stream) => tls_stream,
                 //     Err(e) => {
@@ -164,8 +146,7 @@ async fn tunnel(upgraded: Upgraded, addr: String, proto: PROTO) -> io::Result<()
 
     let (from_client, from_server) = match proto {
         PROTO::TCP => {
-            let mut upstream = TcpStream::connect(addr).await?;
-            upstream.set_nodelay(true)?;
+            let mut upstream = TcpStream::connect_tun(addr).await?;
             tokio::io::copy_bidirectional(&mut upgraded, &mut upstream).await?
         }
         PROTO::UDP => {

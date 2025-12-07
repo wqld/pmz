@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use proxy::tunnel::{TcpListenerTunnelExt, TcpStreamTunnelExt};
 use rsln::{netlink::Netlink, types::addr::AddrFamily};
 use socket2::SockRef;
 use std::{
@@ -125,7 +126,7 @@ async fn start_proxy(inpod_netns: InpodNetns, intercept_gate_url: &str) -> Resul
     tokio::spawn(
         async move {
             loop {
-                match listener.accept().await {
+                match listener.accept_tun().await {
                     Ok((inbound_stream, remote_addr)) => {
                         tokio::spawn(
                             proxy_connection(
@@ -236,7 +237,7 @@ async fn proxy_connection(
         }
         debug!("Proxying to original destination completed.");
     } else {
-        let mut gate_stream = match TcpStream::connect(intercept_gate_addr).await {
+        let mut gate_stream = match TcpStream::connect_tun(intercept_gate_addr).await {
             Ok(stream) => stream,
             Err(e) => {
                 error!(error = ?e, "Failed to connect to intercept gate");
